@@ -1,0 +1,47 @@
+# Experiment configuration for Qwen3-VLA training
+
+# General configuration
+seed: 42
+
+# Model configuration
+model_name: "Qwen/Qwen3-VL-2B-Instruct"
+device: "cuda:0"
+
+# Dataset configuration
+dataset_name: "HuggingFaceVLA/libero"
+action_chunk_len: 8
+train_split: 0.95  # Fraction of episodes for training (0.8 = 80% train, 20% val)
+val_batch_size: 128  # If null, uses same as batch_size
+
+# Data augmentation
+enable_transforms: true
+max_num_transforms: 3
+random_order: false
+val_use_augmentation: false  # Whether to use augmentation on validation set
+
+# Training hyperparameters
+batch_size: 32
+learning_rate: 0.0002  # 2e-4
+weight_decay: 0.01     # 1e-2
+max_grad_norm: 1.0
+grad_accumulation_steps: 1
+max_steps: 150000
+num_warmup_steps: 100
+
+# Checkpoint and validation configuration
+save_checkpoint_interval: 5000
+val_interval: 1000  # Run validation every N steps
+max_val_batches: 256  # Maximum number of batches to evaluate during validation
+output_dir: "/mnt/data0/checkpoints"
+experiment_name: "qwen3_vla_adapter_simple"
+checkpoint_path: null  # Set to path if resuming from checkpoint
+
+# Wandb configuration
+enable_wandb: true
+wandb_project: "qwen3-vla"
+wandb_entity: null  # Set to your wandb username/team
+wandb_log_interval: 10
+print_actions_interval: 250  # Print target/predicted actions every N steps
+
+# DataLoader configuration
+num_workers: 1
