@@ -394,6 +394,90 @@ def format_actions(a: torch.Tensor) -> str:
     )
 
 
+def compute_gradient_norms(model: Qwen3VLA) -> dict[str, float]:
+    """Compute gradient norms for key components of the model."""
+    grad_norms = {}
+
+    # Helper function to compute norm for a module's parameters
+    def compute_module_grad_norm(module: nn.Module, name: str) -> Optional[float]:
+        total_norm = 0.0
+        num_params = 0
+        for p in module.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.detach().data.norm(2)
+                total_norm += param_norm.item() ** 2
+                num_params += 1
+        if num_params > 0:
+            return (total_norm ** 0.5)
+        return None
+
+    # Task embeddings gradient norm
+    norm = compute_module_grad_norm(model.task_embeddings, "task_embeddings")
+    if norm is not None:
+        grad_norms["grad_norm/task_embeddings"] = norm
+
+    # Action token embeddings gradient norm
+    norm = compute_module_grad_norm(
+        model.action_head.action_token_embeddings, "action_token_embeddings"
+    )
+    if norm is not None:
+        grad_norms["grad_norm/action_token_embeddings"] = norm
+
+    # Decoder input layer norm
+    norm = compute_module_grad_norm(
+        model.action_head.decoder.in_layer_norm, "decoder_in_layer_norm"
+    )
+    if norm is not None:
+        grad_norms["grad_norm/decoder_in_layer_norm"] = norm
+
+    # First decoder block
+    if len(model.action_head.decoder.decoder_blocks) > 0:
+        norm = compute_module_grad_norm(
+            model.action_head.decoder.decoder_blocks[0], "decoder_block_0"
+        )
+        if norm is not None:
+            grad_norms["grad_norm/decoder_block_first"] = norm
+
+    # Last decoder block
+    if len(model.action_head.decoder.decoder_blocks) > 1:
+        last_idx = len(model.action_head.decoder.decoder_blocks) - 1
+        norm = compute_module_grad_norm(
+            model.action_head.decoder.decoder_blocks[last_idx], f"decoder_block_{last_idx}"
+        )
+        if norm is not None:
+            grad_norms["grad_norm/decoder_block_last"] = norm
+
+    # Output projection
+    norm = compute_module_grad_norm(
+        model.action_head.decoder.out_proj, "decoder_out_proj"
+    )
+    if norm is not None:
+        grad_norms["grad_norm/decoder_out_proj"] = norm
+
+    # Overall action head gradient norm
+    norm = compute_module_grad_norm(model.action_head, "action_head")
+    if norm is not None:
+        grad_norms["grad_norm/action_head_total"] = norm
+
+    # Proprio projector gradient norm
+    norm = compute_module_grad_norm(model.proprio_projector, "proprio_projector")
+    if norm is not None:
+        grad_norms["grad_norm/proprio_projector"] = norm
+
+    # Global gradient norm across all trainable parameters
+    total_norm = 0.0
+    num_params = 0
+    for p in model.parameters():
+        if p.requires_grad and p.grad is not None:
+            param_norm = p.grad.detach().data.norm(2)
+            total_norm += param_norm.item() ** 2
+            num_params += 1
+    if num_params > 0:
+        grad_norms["grad_norm/global"] = total_norm ** 0.5
+
+    return grad_norms
+
+
 def validate(
     model: Qwen3VLA,
     val_dataloader: DataLoader,
@@ -692,6 +776,11 @@ def main():
             loss.backward()
 
             if (step + 1) % config.grad_accumulation_steps == 0:
+                # Compute gradient norms before clipping
+                if config.enable_wandb and step % config.wandb_log_interval == 0:
+                    grad_norms = compute_gradient_norms(model)
+                    wandb.log(grad_norms, step=step)
+
                 torch.nn.utils.clip_grad_norm_(
                     trainable_params, max_norm=config.max_grad_norm
                 )
