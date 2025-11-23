@@ -66,6 +66,7 @@ class RoboTwinVLADataset(Dataset):
         self,
         dataset_root: str,
         norm_stats_path: str,
+        episode_lengths_path: str,
         action_horizon: int = 50,
         image_size: tuple[int, int] = (320, 240),  # (width, height) - native RoboTwin resolution
         robot_types: Optional[list[str]] = None,
@@ -80,6 +81,7 @@ class RoboTwinVLADataset(Dataset):
         Args:
             dataset_root: Root directory of RoboTwin dataset
             norm_stats_path: Path to normalization statistics JSON
+            episode_lengths_path: Path to episode lengths JSON
             action_horizon: Number of future timesteps to predict
             image_size: Size to resize images (width, height) - default 320x240
             robot_types: Optional filter for robot types
@@ -92,7 +94,11 @@ class RoboTwinVLADataset(Dataset):
         """
         self.dataset_root = Path(dataset_root)
         self.action_horizon = action_horizon
-        self.image_size = image_size if isinstance(image_size, tuple) else (image_size, image_size)
+        # Convert image_size to tuple (handles list from YAML config)
+        if isinstance(image_size, (tuple, list)):
+            self.image_size = tuple(image_size)
+        else:
+            self.image_size = (image_size, image_size)
         self.enable_augmentation = enable_augmentation
 
         # Build index
@@ -122,15 +128,37 @@ class RoboTwinVLADataset(Dataset):
             self.image_transforms = None
             print("Image augmentation disabled")
 
+        # Load episode lengths from cache (required)
+        episode_lengths_file = Path(episode_lengths_path)
+        if not episode_lengths_file.exists():
+            raise FileNotFoundError(
+                f"Episode lengths cache not found at {episode_lengths_file}\n"
+                f"Please run extract_delta_actions.py first to generate this file."
+            )
+
+        print(f"Loading episode lengths from {episode_lengths_file}...")
+        with open(episode_lengths_file) as f:
+            episode_lengths = json.load(f)
+        print(f"  Loaded lengths for {len(episode_lengths)} episodes")
+
         # Build list of valid (episode, timestep) pairs
         # Each episode contributes multiple samples (one per timestep)
         # We can use ALL timesteps now since we'll pad at the end
         self.samples = []
         print("\nBuilding sample list...")
         for ep_meta in self.index.episodes:
-            # Assuming 53 timesteps per episode (typical), will verify when loading
-            # We can use all timesteps since we'll repeat final state if needed
-            num_timesteps = 53  # Will be adjusted when loading actual data
+            # Create unique episode key (must match extract_delta_actions.py format)
+            episode_key = f"{ep_meta.task_name}/{ep_meta.robot_type}_{ep_meta.variant}/episode{ep_meta.episode_idx}"
+
+            # Get actual episode length from cache (required)
+            if episode_key not in episode_lengths:
+                raise KeyError(
+                    f"Episode {episode_key} not found in lengths cache.\n"
+                    f"Please re-run extract_delta_actions.py with matching filters."
+                )
+
+            num_timesteps = episode_lengths[episode_key]
+
             for t in range(num_timesteps):
                 self.samples.append((ep_meta, t))
 

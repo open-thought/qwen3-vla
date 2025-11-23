@@ -49,6 +49,7 @@ def create_dataloaders(config: TrainingConfig):
     full_dataset = RoboTwinVLADataset(
         dataset_root=config.dataset_root,
         norm_stats_path=config.norm_stats_path,
+        episode_lengths_path=config.episode_lengths_path,
         action_horizon=config.action_horizon,
         image_size=config.image_size,
         robot_types=config.robot_types,
@@ -78,6 +79,7 @@ def create_dataloaders(config: TrainingConfig):
     val_dataset_no_aug = RoboTwinVLADataset(
         dataset_root=config.dataset_root,
         norm_stats_path=config.norm_stats_path,
+        episode_lengths_path=config.episode_lengths_path,
         action_horizon=config.action_horizon,
         image_size=config.image_size,
         robot_types=config.robot_types,
@@ -121,22 +123,19 @@ def create_dataloaders(config: TrainingConfig):
     return train_loader, val_loader
 
 
-def train_step(model, batch, scaler, use_amp):
+def train_step(model, batch, use_amp):
     """Single training step."""
     # Move batch to device
     device = next(model.parameters()).device
     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-    # Forward pass with mixed precision
-    with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16 if use_amp else torch.float32):
+    # Forward pass with mixed precision (bfloat16)
+    with torch.amp.autocast('cuda', enabled=use_amp, dtype=torch.bfloat16 if use_amp else torch.float32):
         outputs = model(**batch)
         loss = outputs["loss"]
 
-    # Backward pass
-    if scaler is not None:
-        scaler.scale(loss).backward()
-    else:
-        loss.backward()
+    # Backward pass (no scaler needed for bfloat16)
+    loss.backward()
 
     return loss.item()
 
@@ -158,7 +157,7 @@ def validate(model, val_loader, config, step):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
         # Forward pass
-        with torch.cuda.amp.autocast(enabled=config.use_amp, dtype=torch.bfloat16 if config.use_amp else torch.float32):
+        with torch.amp.autocast('cuda', enabled=config.use_amp, dtype=torch.bfloat16 if config.use_amp else torch.float32):
             outputs = model(**batch)
             loss = outputs["loss"]
 
@@ -173,7 +172,7 @@ def validate(model, val_loader, config, step):
     return avg_loss
 
 
-def save_checkpoint(model, optimizer, scheduler, scaler, step, config, is_best=False):
+def save_checkpoint(model, optimizer, scheduler, step, config, is_best=False):
     """Save training checkpoint."""
     checkpoint_dir = Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -188,7 +187,6 @@ def save_checkpoint(model, optimizer, scheduler, scaler, step, config, is_best=F
         "step": step,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
-        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
         "config": config.to_dict(),
     }, state_path)
 
@@ -256,9 +254,6 @@ def train(config: TrainingConfig):
         num_training_steps=num_training_steps,
     )
 
-    # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if config.use_amp else None
-
     # Resume from checkpoint if specified
     start_step = 0
     if config.resume_from_checkpoint:
@@ -269,8 +264,6 @@ def train(config: TrainingConfig):
             start_step = state["step"]
             optimizer.load_state_dict(state["optimizer_state_dict"])
             scheduler.load_state_dict(state["scheduler_state_dict"])
-            if scaler is not None and state["scaler_state_dict"] is not None:
-                scaler.load_state_dict(state["scaler_state_dict"])
             print(f"Resumed from step {start_step}")
 
     # Training loop
@@ -297,23 +290,16 @@ def train(config: TrainingConfig):
             batch = next(train_iterator)
 
         # Training step
-        loss = train_step(model.model, batch, scaler, config.use_amp)
+        loss = train_step(model.model, batch, config.use_amp)
         running_loss += loss
 
         # Gradient accumulation
         if (step + 1) % config.gradient_accumulation_steps == 0:
             # Clip gradients
-            if scaler is not None:
-                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.model.parameters(), config.max_grad_norm)
 
             # Optimizer step
-            if scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-
+            optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
 
@@ -351,15 +337,15 @@ def train(config: TrainingConfig):
             # Save best model
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(model, optimizer, scheduler, scaler, global_step, config, is_best=True)
+                save_checkpoint(model, optimizer, scheduler, global_step, config, is_best=True)
 
         # Save checkpoint
         if (step + 1) % config.save_interval == 0:
-            save_checkpoint(model, optimizer, scheduler, scaler, global_step, config)
+            save_checkpoint(model, optimizer, scheduler, global_step, config)
 
     # Final save
     print("\nTraining complete!")
-    save_checkpoint(model, optimizer, scheduler, scaler, global_step, config)
+    save_checkpoint(model, optimizer, scheduler, global_step, config)
 
     if config.enable_wandb and WANDB_AVAILABLE:
         wandb.finish()

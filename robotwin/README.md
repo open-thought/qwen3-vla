@@ -24,6 +24,7 @@ First, extract delta actions from the dataset and compute normalization statisti
 python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions.hdf5 \
+    --episode-lengths-output data/robotwin_episode_lengths.json \
     --action-horizon 50
 
 # Compute normalization statistics per robot type
@@ -32,12 +33,14 @@ python compute_norm_stats.py \
     --output data/robotwin_norm_stats.json
 ```
 
-This creates `data/robotwin_norm_stats.json` with 1%/99% percentile statistics for:
-- Robot states (current joint positions)
-- Delta actions (future movements)
-- Gripper states
-
-Per robot type: `aloha-agilex`, `arx-x5`, `franka`, `ur5`
+This creates:
+- `data/robotwin_delta_actions.hdf5` - Extracted delta actions for normalization
+- `data/robotwin_episode_lengths.json` - Actual episode lengths (required for training)
+- `data/robotwin_norm_stats.json` - Normalization statistics with 1%/99% percentiles:
+  - Robot states (current joint positions)
+  - Delta actions (future movements)
+  - Gripper states
+  - Per robot type: `aloha-agilex`, `arx-x5`, `franka`, `ur5`
 
 ### 2. Create Training Configuration
 
@@ -56,6 +59,7 @@ model_name: "Qwen/Qwen3-VL-2B-Instruct"
 # Dataset
 dataset_root: "/mnt/robotwin/dataset"
 norm_stats_path: "data/robotwin_norm_stats.json"
+episode_lengths_path: "data/robotwin_episode_lengths.json"
 action_horizon: 50
 image_size: [320, 240]  # Native RoboTwin resolution
 
@@ -82,6 +86,9 @@ wandb_project: "qwen3-vla-robotwin"
 ### 3. Start Training
 
 ```bash
+# Quick test with single robot/task (recommended first)
+python train.py --config config_test.yaml
+
 # Full training
 python train.py --config config.yaml
 
@@ -203,36 +210,3 @@ Training metrics logged to WandB:
 - `train/loss`: Training loss (on action tokens only)
 - `train/learning_rate`: Current learning rate
 - `val/loss`: Validation loss
-
-## Troubleshooting
-
-**Out of memory?**
-- Reduce `batch_size` to 4 or 2
-- Enable LoRA: `use_lora: true`
-- Reduce `max_num_transforms` for augmentation
-
-**Loss not decreasing?**
-- Check normalization stats are correct
-- Verify action tokens in range [151936, 153983]
-- Try higher learning rate (e.g., 5e-5)
-
-**Data loading slow?**
-- Increase `num_workers` in config
-- Increase `prefetch_factor`
-- Use faster storage (SSD/NVMe)
-
-## Citation
-
-```bibtex
-@article{qwen3vl2024,
-  title={Qwen3-VL: Large Vision Language Model},
-  author={Qwen Team},
-  year={2024}
-}
-
-@article{fast2024,
-  title={FAST: Frequency Action Space Tokenizer},
-  author={Physical Intelligence},
-  year={2024}
-}
-```

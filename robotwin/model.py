@@ -8,7 +8,7 @@ training utilities for vision-language-action learning.
 import torch
 import torch.nn as nn
 from transformers import (
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     AutoProcessor,
 )
 from peft import LoraConfig, get_peft_model, TaskType
@@ -54,10 +54,10 @@ class Qwen3VLAModel(nn.Module):
         super().__init__()
 
         print(f"Loading {model_name}...")
-        self.model = AutoModelForVision2Seq.from_pretrained(
+        self.model = AutoModelForImageTextToText.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            dtype=torch.bfloat16,
+            device_map="cuda:0",  # Use only GPU 0 to avoid multi-GPU bfloat16 issues
             trust_remote_code=True,
         )
 
@@ -200,10 +200,10 @@ class Qwen3VLAModel(nn.Module):
         instance = cls.__new__(cls)
         super(Qwen3VLAModel, instance).__init__()
 
-        instance.model = AutoModelForVision2Seq.from_pretrained(
+        instance.model = AutoModelForImageTextToText.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            dtype=torch.bfloat16,
+            device_map="cuda:0",  # Use only GPU 0 to avoid multi-GPU bfloat16 issues
             trust_remote_code=True,
             **kwargs
         )

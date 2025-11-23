@@ -25,7 +25,7 @@ from tqdm import tqdm
 from efficient_batch_loader import RoboTwinDatasetIndex, EpisodeMetadata
 
 
-def extract_episode_delta_actions(zf: zipfile.ZipFile, metadata: EpisodeMetadata, action_horizon: int) -> dict:
+def extract_episode_delta_actions(zf: zipfile.ZipFile, metadata: EpisodeMetadata, action_horizon: int) -> tuple:
     """
     Extract delta action chunks from an episode.
 
@@ -35,7 +35,7 @@ def extract_episode_delta_actions(zf: zipfile.ZipFile, metadata: EpisodeMetadata
         action_horizon: Number of future timesteps to predict
 
     Returns:
-        Dictionary with states and delta_actions arrays, or None if failed
+        Tuple of (episode_data_dict, num_timesteps) or (None, 0) if failed
     """
     try:
         # Construct path within zip
@@ -65,7 +65,7 @@ def extract_episode_delta_actions(zf: zipfile.ZipFile, metadata: EpisodeMetadata
         # We can only use timesteps where we have action_horizon future steps
         # Skip last action_horizon timesteps
         if num_timesteps <= action_horizon:
-            return None
+            return None, num_timesteps
 
         states_list = []
         delta_actions_list = []
@@ -87,23 +87,24 @@ def extract_episode_delta_actions(zf: zipfile.ZipFile, metadata: EpisodeMetadata
             grippers_list.append(current_gripper)
 
         if len(states_list) == 0:
-            return None
+            return None, num_timesteps
 
         return {
             "states": np.array(states_list),  # (num_valid_timesteps, 2*dof)
             "delta_actions": np.array(delta_actions_list),  # (num_valid_timesteps, action_horizon, 2*dof)
             "grippers": np.array(grippers_list),  # (num_valid_timesteps, 2)
-        }
+        }, num_timesteps
 
     except Exception as e:
         print(f"Warning: Failed to load {metadata.task_name}/episode{metadata.episode_idx}: {e}")
-        return None
+        return None, 0
 
 
 def extract_delta_actions(
     dataset_root: str,
     output_path: str,
     action_horizon: int = 50,
+    episode_lengths_path: str = "data/robotwin_episode_lengths.json",
     robot_types: Optional[List[str]] = None,
     variants: Optional[List[str]] = None,
     tasks: Optional[List[str]] = None,
@@ -115,6 +116,7 @@ def extract_delta_actions(
         dataset_root: Root directory of RoboTwin dataset
         output_path: Path to output HDF5 file
         action_horizon: Number of future timesteps to predict
+        episode_lengths_path: Path to output JSON file for episode lengths
         robot_types: Optional filter for robot types
         variants: Optional filter for variants
         tasks: Optional filter for tasks
@@ -139,6 +141,9 @@ def extract_delta_actions(
         "grippers": [],
     })
 
+    # Track episode lengths
+    episode_lengths = {}
+
     # Track open zip files
     open_zips = {}
 
@@ -152,7 +157,11 @@ def extract_delta_actions(
             zf = open_zips[ep_meta.zip_path]
 
             # Extract delta actions for this episode
-            episode_data = extract_episode_delta_actions(zf, ep_meta, action_horizon)
+            episode_data, num_timesteps = extract_episode_delta_actions(zf, ep_meta, action_horizon)
+
+            # Create unique episode key
+            episode_key = f"{ep_meta.task_name}/{ep_meta.robot_type}_{ep_meta.variant}/episode{ep_meta.episode_idx}"
+            episode_lengths[episode_key] = num_timesteps
 
             if episode_data is None:
                 continue
@@ -210,9 +219,19 @@ def extract_delta_actions(
         f.attrs["action_horizon"] = action_horizon
         f.attrs["robot_types"] = json.dumps(list(robot_data.keys()))
 
+    # Save episode lengths to JSON
+    lengths_path = Path(episode_lengths_path)
+    lengths_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving episode lengths to {lengths_path}...")
+    with open(lengths_path, "w") as f:
+        json.dump(episode_lengths, f, indent=2)
+
     print("Done!")
     print(f"\nData saved to {output_path}")
-    print("Structure:")
+    print(f"Episode lengths saved to {lengths_path}")
+    print(f"  Total episodes: {len(episode_lengths)}")
+    print(f"  Length range: [{min(episode_lengths.values())}, {max(episode_lengths.values())}]")
+    print("\nStructure:")
     print("  <robot_type>/")
     print("    - states: (num_samples, 2*dof)")
     print("    - delta_actions: (num_samples, action_horizon, 2*dof)")
@@ -262,6 +281,12 @@ def main():
         default=None,
         help="Filter by tasks (e.g., adjust_bottle click_bell)",
     )
+    parser.add_argument(
+        "--episode-lengths-output",
+        type=str,
+        default="data/robotwin_episode_lengths.json",
+        help="Output JSON file path for episode lengths",
+    )
 
     args = parser.parse_args()
 
@@ -269,6 +294,7 @@ def main():
         dataset_root=args.dataset_root,
         output_path=args.output,
         action_horizon=args.action_horizon,
+        episode_lengths_path=args.episode_lengths_output,
         robot_types=args.robot_types,
         variants=args.variants,
         tasks=args.tasks,

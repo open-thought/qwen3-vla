@@ -20,6 +20,7 @@ class TrainingConfig:
     # Dataset configuration
     dataset_root: str = "/mnt/robotwin/dataset"
     norm_stats_path: str = "data/robotwin_norm_stats.json"
+    episode_lengths_path: str = "data/robotwin_episode_lengths.json"
     action_horizon: int = 50
     image_size: tuple[int, int] = (320, 240)  # (width, height) - native RoboTwin resolution
 
@@ -70,9 +71,8 @@ class TrainingConfig:
     wandb_run_name: Optional[str] = None
     wandb_log_interval: int = 10
 
-    # Mixed precision training
+    # Mixed precision training (always uses bfloat16)
     use_amp: bool = True
-    amp_dtype: str = "bfloat16"  # "bfloat16" or "float16"
 
     # Seed for reproducibility
     seed: int = 42
