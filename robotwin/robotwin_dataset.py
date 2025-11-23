@@ -37,7 +37,7 @@ class VLATrainingSample:
     # Text prompt components
     task_description: str
     robot_type: str
-    discretized_state: np.ndarray  # (2*dof,) in [0, 255]
+    discretized_state: np.ndarray  # (2*dof + 2,) in [0, 255] - arm joints + grippers
 
     # Action targets
     action_tokens: list[int]  # FAST tokens for delta actions
@@ -55,7 +55,7 @@ class RoboTwinVLADataset(Dataset):
     - 3 camera images (left, right, head) at timestep t
     - Task description text
     - Robot type
-    - Current robot state (discretized to 0-255)
+    - Current robot state: arm joints + gripper positions (discretized to 0-255)
     - Future delta action chunk (tokenized with FAST)
 
     If timestep is near the end of episode, the final joint state is repeated
@@ -294,12 +294,16 @@ class RoboTwinVLADataset(Dataset):
         delta_actions = future_states - current_state[None, :]  # (action_horizon, 2*dof)
         delta_actions = delta_actions.astype(np.float32)
 
-        # Normalize state and delta actions
+        # Normalize state, grippers, and delta actions
         normalized_state = self.normalizer.normalize_state(current_state, robot_type)
+        normalized_grippers = self.normalizer.normalize_grippers(current_grippers, robot_type)
         normalized_deltas = self.normalizer.normalize_delta_actions(delta_actions, robot_type)
 
-        # Discretize state for prompt (map to [0, 255])
-        discretized_state = discretize_normalized_values(normalized_state, num_bins=256)
+        # Concatenate normalized state and grippers: (2*dof + 2,)
+        normalized_state_with_grippers = np.concatenate([normalized_state, normalized_grippers])
+
+        # Discretize state (including grippers) for prompt (map to [0, 255])
+        discretized_state = discretize_normalized_values(normalized_state_with_grippers, num_bins=256)
 
         # Tokenize delta actions
         action_tokens = self.tokenizer.encode(normalized_deltas, return_torch=False)[0]

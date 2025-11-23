@@ -59,8 +59,7 @@ class VLADataCollator:
 
             prompt_text = f"""Task: {sample['task_description']}
 Robot: {sample['robot_type']}
-State: [{state_str}]
-Actions:"""
+State: [{state_str}]"""
 
             # Prepare conversation with 3 images
             # Images are already tensors in (C, H, W) format with values in [0, 1]

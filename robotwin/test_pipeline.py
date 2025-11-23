@@ -8,10 +8,14 @@ Tests:
 - Batch collation with loss masking
 """
 
+import argparse
+from pathlib import Path
+
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor
 import numpy as np
+from PIL import Image
 
 from robotwin_dataset import RoboTwinVLADataset
 from data_collator import VLADataCollator
@@ -28,9 +32,11 @@ def test_dataset_loading():
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
         norm_stats_path="data/test_norm_stats.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
@@ -87,6 +93,7 @@ def test_image_augmentation():
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
@@ -96,9 +103,11 @@ def test_image_augmentation():
     dataset_with_aug = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
         norm_stats_path="data/test_norm_stats.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=True,
@@ -146,9 +155,11 @@ def test_normalization_roundtrip():
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
         norm_stats_path="data/test_norm_stats.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
@@ -212,9 +223,11 @@ def test_action_tokenization():
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
         norm_stats_path="data/test_norm_stats.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
@@ -267,10 +280,12 @@ def test_data_collator():
     # Create dataset
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
@@ -358,10 +373,12 @@ def test_full_pipeline():
     # Create dataset with augmentation
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
+        robot_types=["franka"],
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=True,
@@ -419,6 +436,88 @@ def test_full_pipeline():
     print(f"{'='*80}\n")
 
 
+def save_augmented_images(output_dir: str, num_samples: int = 5):
+    """
+    Save images with and without augmentation for visual inspection.
+
+    Args:
+        output_dir: Directory to save images
+        num_samples: Number of samples to save
+    """
+    print("=" * 80)
+    print("SAVING AUGMENTED IMAGES FOR INSPECTION")
+    print("=" * 80)
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n✓ Saving to: {output_path}")
+
+    # Create dataset WITHOUT augmentation
+    dataset_no_aug = RoboTwinVLADataset(
+        dataset_root="/mnt/robotwin/dataset",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
+        action_horizon=50,
+        image_size=(320, 240),
+        tasks=["adjust_bottle"],
+        robot_types=["franka"],
+        variants=["clean_50"],
+        cache_size=5,
+        enable_augmentation=False,
+    )
+
+    # Create dataset WITH augmentation
+    dataset_with_aug = RoboTwinVLADataset(
+        dataset_root="/mnt/robotwin/dataset",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
+        action_horizon=50,
+        image_size=(320, 240),
+        tasks=["adjust_bottle"],
+        robot_types=["franka"],
+        variants=["clean_50"],
+        cache_size=5,
+        enable_augmentation=True,
+        max_num_transforms=3,
+    )
+
+    print(f"\n✓ Saving {num_samples} samples (3 cameras each, with and without augmentation)...")
+
+    for idx in range(min(num_samples, len(dataset_no_aug))):
+        # Get samples
+        sample_no_aug = dataset_no_aug[idx]
+        sample_with_aug = dataset_with_aug[idx]
+
+        # Save each camera view
+        for camera_name in ['left_camera', 'right_camera', 'head_camera']:
+            # Original (no augmentation)
+            img_tensor_orig = sample_no_aug[camera_name]  # (3, H, W) in [0, 1]
+            img_array_orig = (img_tensor_orig.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+            img_orig = Image.fromarray(img_array_orig)
+            img_orig.save(output_path / f"sample_{idx:03d}_{camera_name}_original.png")
+
+            # Augmented
+            img_tensor_aug = sample_with_aug[camera_name]  # (3, H, W) in [0, 1]
+            img_array_aug = (img_tensor_aug.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+            img_aug = Image.fromarray(img_array_aug)
+            img_aug.save(output_path / f"sample_{idx:03d}_{camera_name}_augmented.png")
+
+        print(f"  Saved sample {idx + 1}/{num_samples}")
+
+    dataset_no_aug.close()
+    dataset_with_aug.close()
+
+    print(f"\n✓ Saved {num_samples * 3 * 2} images to {output_path}")
+    print(f"  - Original images: sample_XXX_CAMERA_original.png")
+    print(f"  - Augmented images: sample_XXX_CAMERA_augmented.png")
+    print(f"  - Cameras: left_camera, right_camera, head_camera")
+
+    print(f"\n{'='*80}")
+    print("✅ IMAGE SAVING COMPLETE")
+    print(f"{'='*80}\n")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "=" * 80)
@@ -449,5 +548,28 @@ def run_all_tests():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Test dataset and collator pipeline, optionally save augmented images"
+    )
+    parser.add_argument(
+        "--save-images",
+        type=str,
+        default=None,
+        help="Directory to save augmented images for inspection (optional)",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=5,
+        help="Number of samples to save when --save-images is used (default: 5)",
+    )
+    args = parser.parse_args()
+
+    # Save images if requested
+    if args.save_images:
+        save_augmented_images(args.save_images, args.num_samples)
+        exit(0)
+
+    # Otherwise run all tests
     success = run_all_tests()
     exit(0 if success else 1)
