@@ -1,0 +1,387 @@
+"""
+PyTorch Dataset for RoboTwin data with VLA training format.
+
+Loads episodes, extracts current state and future delta actions,
+normalizes and tokenizes for VLM training.
+"""
+
+import io
+import json
+import random
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import h5py
+import numpy as np
+import torch
+from PIL import Image
+from torch.utils.data import Dataset
+import torchvision.transforms.v2 as transforms
+
+from efficient_batch_loader import RoboTwinDatasetIndex, ZipFileCache, EpisodeMetadata
+from normalization import MultiRobotNormalizer, discretize_normalized_values
+from action_tokenizer import ActionTokenizer
+
+
+@dataclass
+class VLATrainingSample:
+    """Single training sample for VLA model."""
+
+    # Images (3 cameras)
+    left_camera: torch.Tensor  # (3, H, W)
+    right_camera: torch.Tensor  # (3, H, W)
+    head_camera: torch.Tensor  # (3, H, W)
+
+    # Text prompt components
+    task_description: str
+    robot_type: str
+    discretized_state: np.ndarray  # (2*dof,) in [0, 255]
+
+    # Action targets
+    action_tokens: list[int]  # FAST tokens for delta actions
+
+    # Metadata
+    episode_id: str
+    timestep: int
+
+
+class RoboTwinVLADataset(Dataset):
+    """
+    PyTorch Dataset for RoboTwin with VLA training format.
+
+    Each sample consists of:
+    - 3 camera images (left, right, head) at timestep t
+    - Task description text
+    - Robot type
+    - Current robot state (discretized to 0-255)
+    - Future delta action chunk (tokenized with FAST)
+
+    If timestep is near the end of episode, the final joint state is repeated
+    to ensure we always have action_horizon future predictions.
+    """
+
+    def __init__(
+        self,
+        dataset_root: str,
+        norm_stats_path: str,
+        action_horizon: int = 50,
+        image_size: tuple[int, int] = (320, 240),  # (width, height) - native RoboTwin resolution
+        robot_types: Optional[list[str]] = None,
+        variants: Optional[list[str]] = None,
+        tasks: Optional[list[str]] = None,
+        cache_size: int = 10,
+        enable_augmentation: bool = False,
+        max_num_transforms: int = 3,
+        random_order: bool = False,
+    ):
+        """
+        Args:
+            dataset_root: Root directory of RoboTwin dataset
+            norm_stats_path: Path to normalization statistics JSON
+            action_horizon: Number of future timesteps to predict
+            image_size: Size to resize images (width, height) - default 320x240
+            robot_types: Optional filter for robot types
+            variants: Optional filter for variants
+            tasks: Optional filter for tasks
+            cache_size: Number of zip files to keep open
+            enable_augmentation: Whether to apply image augmentation
+            max_num_transforms: Maximum number of augmentations to apply
+            random_order: Whether to apply augmentations in random order
+        """
+        self.dataset_root = Path(dataset_root)
+        self.action_horizon = action_horizon
+        self.image_size = image_size if isinstance(image_size, tuple) else (image_size, image_size)
+        self.enable_augmentation = enable_augmentation
+
+        # Build index
+        print("Building dataset index...")
+        self.index = RoboTwinDatasetIndex(dataset_root)
+        self.index.build_index(robot_types=robot_types, variants=variants, tasks=tasks)
+
+        # Setup image augmentation transforms (following lerobot pattern)
+        if enable_augmentation:
+            # Define augmentation transforms (same as lerobot)
+            augmentation_list = [
+                transforms.ColorJitter(brightness=(0.8, 1.2)),
+                transforms.ColorJitter(contrast=(0.8, 1.2)),
+                transforms.ColorJitter(saturation=(0.5, 1.5)),
+                transforms.ColorJitter(hue=(-0.05, 0.05)),
+                transforms.RandomAffine(degrees=(-5.0, 5.0), translate=(0.05, 0.05)),
+            ]
+
+            # RandomSubsetApply: randomly select up to max_num_transforms
+            self.image_transforms = transforms.RandomChoice(
+                [transforms.Compose([t]) for t in augmentation_list],
+            ) if not random_order else transforms.Compose([
+                transforms.RandomApply([t], p=0.5) for t in augmentation_list[:max_num_transforms]
+            ])
+            print(f"Image augmentation enabled (max {max_num_transforms} transforms)")
+        else:
+            self.image_transforms = None
+            print("Image augmentation disabled")
+
+        # Build list of valid (episode, timestep) pairs
+        # Each episode contributes multiple samples (one per timestep)
+        # We can use ALL timesteps now since we'll pad at the end
+        self.samples = []
+        print("\nBuilding sample list...")
+        for ep_meta in self.index.episodes:
+            # Assuming 53 timesteps per episode (typical), will verify when loading
+            # We can use all timesteps since we'll repeat final state if needed
+            num_timesteps = 53  # Will be adjusted when loading actual data
+            for t in range(num_timesteps):
+                self.samples.append((ep_meta, t))
+
+        print(f"Total samples: {len(self.samples)}")
+
+        # Initialize normalizer and tokenizer
+        print("\nInitializing normalizer and action tokenizer...")
+        self.normalizer = MultiRobotNormalizer(norm_stats_path)
+        self.tokenizer = ActionTokenizer()
+
+        # Zip file cache
+        self.zip_cache = ZipFileCache(max_open=cache_size)
+
+        print(f"\nDataset ready!")
+        print(f"  Episodes: {len(self.index.episodes)}")
+        print(f"  Samples: {len(self.samples)}")
+        print(f"  Action horizon: {action_horizon}")
+        print(f"  Image size: {self.image_size[0]}x{self.image_size[1]} (WxH)")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        """
+        Get a single training sample.
+
+        Returns:
+            Dictionary with images, text, and action tokens
+        """
+        ep_meta, timestep = self.samples[idx]
+
+        try:
+            # Load episode data
+            episode_data = self._load_episode(ep_meta)
+
+            # Extract sample at timestep t
+            sample = self._extract_sample(episode_data, ep_meta, timestep)
+
+            # Close HDF5 file
+            episode_data["_hdf5_file"].close()
+
+            return sample
+
+        except Exception as e:
+            print(f"Warning: Failed to load sample {idx} (episode {ep_meta.episode_idx}, t={timestep}): {e}")
+            # Return next sample
+            return self.__getitem__((idx + 1) % len(self))
+
+    def _load_episode(self, ep_meta: EpisodeMetadata) -> dict:
+        """Load episode data from zip file."""
+        # Get zip file from cache
+        zf = self.zip_cache.get(ep_meta.zip_path)
+
+        # Construct paths within zip
+        stem = f"{ep_meta.robot_type}_{ep_meta.variant}"
+        episode_name = f"episode{ep_meta.episode_idx}"
+
+        hdf5_path = f"{stem}/data/{episode_name}.hdf5"
+        instruction_path = f"{stem}/instructions/{episode_name}.json"
+
+        # Load HDF5 data
+        hdf5_bytes = zf.read(hdf5_path)
+        hdf5_file = h5py.File(io.BytesIO(hdf5_bytes), "r")
+
+        # Load instruction
+        instruction_bytes = zf.read(instruction_path)
+        instruction_data = json.loads(instruction_bytes.decode("utf-8"))
+
+        # Sample random instruction variation
+        instruction = random.choice(
+            instruction_data["seen"] + instruction_data["unseen"]
+        )
+
+        # Extract data
+        data = {
+            "task": ep_meta.task_name,
+            "instruction": instruction,
+            "robot_type": ep_meta.robot_type,
+            # Joint actions (left + right arms)
+            "left_arm": np.array(hdf5_file["joint_action"]["left_arm"]),
+            "right_arm": np.array(hdf5_file["joint_action"]["right_arm"]),
+            "left_gripper": np.array(hdf5_file["joint_action"]["left_gripper"]),
+            "right_gripper": np.array(hdf5_file["joint_action"]["right_gripper"]),
+            # Camera images (stored as compressed bytes in HDF5)
+            "head_camera_rgb": hdf5_file["observation"]["head_camera"]["rgb"],
+            "left_camera_rgb": hdf5_file["observation"]["left_camera"]["rgb"],
+            "right_camera_rgb": hdf5_file["observation"]["right_camera"]["rgb"],
+            # Keep HDF5 file open for lazy loading
+            "_hdf5_file": hdf5_file,
+        }
+
+        return data
+
+    def _extract_sample(
+        self,
+        episode_data: dict,
+        ep_meta: EpisodeMetadata,
+        timestep: int
+    ) -> dict:
+        """Extract a single training sample from episode at given timestep."""
+        robot_type = ep_meta.robot_type
+
+        # Get current state (concatenated left + right arms)
+        left_arm = episode_data["left_arm"]
+        right_arm = episode_data["right_arm"]
+        full_joints = np.concatenate([left_arm, right_arm], axis=1)  # (T, 2*dof)
+
+        num_timesteps = len(full_joints)
+        current_state = full_joints[timestep].astype(np.float32)  # (2*dof,)
+
+        # Get gripper states
+        left_gripper = episode_data["left_gripper"][timestep]
+        right_gripper = episode_data["right_gripper"][timestep]
+        current_grippers = np.array([left_gripper, right_gripper], dtype=np.float32)
+
+        # Get future states for delta actions
+        # If we don't have enough future timesteps, repeat the final state
+        future_end = min(timestep + 1 + self.action_horizon, num_timesteps)
+        future_states = full_joints[timestep+1:future_end]  # (num_available, 2*dof)
+
+        # Pad with final state if needed
+        num_available = len(future_states)
+        if num_available < self.action_horizon:
+            # Repeat the final state to fill the action horizon
+            final_state = full_joints[-1:].repeat(self.action_horizon - num_available, axis=0)
+            future_states = np.concatenate([future_states, final_state], axis=0)
+
+        # Now future_states has shape (action_horizon, 2*dof)
+        assert len(future_states) == self.action_horizon, \
+            f"Expected {self.action_horizon} future states, got {len(future_states)}"
+
+        # Compute delta actions
+        delta_actions = future_states - current_state[None, :]  # (action_horizon, 2*dof)
+        delta_actions = delta_actions.astype(np.float32)
+
+        # Normalize state and delta actions
+        normalized_state = self.normalizer.normalize_state(current_state, robot_type)
+        normalized_deltas = self.normalizer.normalize_delta_actions(delta_actions, robot_type)
+
+        # Discretize state for prompt (map to [0, 255])
+        discretized_state = discretize_normalized_values(normalized_state, num_bins=256)
+
+        # Tokenize delta actions
+        action_tokens = self.tokenizer.encode(normalized_deltas, return_torch=False)[0]
+
+        # Load and process images
+        left_img = self._load_and_resize_image(episode_data["left_camera_rgb"][timestep])
+        right_img = self._load_and_resize_image(episode_data["right_camera_rgb"][timestep])
+        head_img = self._load_and_resize_image(episode_data["head_camera_rgb"][timestep])
+
+        # Build sample
+        sample = {
+            # Images as tensors (C, H, W), normalized to [0, 1]
+            "left_camera": left_img,
+            "right_camera": right_img,
+            "head_camera": head_img,
+
+            # Text components
+            "task_description": episode_data["instruction"],
+            "robot_type": robot_type,
+
+            # State (discretized for prompt)
+            "discretized_state": discretized_state,  # (2*dof,) in [0, 255]
+
+            # Action targets
+            "action_tokens": action_tokens,  # List of token IDs
+
+            # Normalized values (for verification/debugging)
+            "normalized_state": normalized_state,
+            "normalized_deltas": normalized_deltas,
+
+            # Metadata
+            "episode_id": f"{ep_meta.task_name}_ep{ep_meta.episode_idx}",
+            "timestep": timestep,
+        }
+
+        return sample
+
+    def _load_and_resize_image(self, compressed_bytes: bytes) -> torch.Tensor:
+        """Load compressed image, resize if needed, and apply augmentation."""
+        # Decode image
+        image = Image.open(io.BytesIO(compressed_bytes)).convert("RGB")
+
+        # Resize only if image size doesn't match target (width, height)
+        width, height = self.image_size
+        if image.size != (width, height):
+            image = image.resize((width, height), Image.BILINEAR)
+
+        # Convert to tensor (C, H, W) and normalize to [0, 1]
+        image_array = np.array(image).astype(np.float32) / 255.0
+        image_tensor = torch.from_numpy(image_array).permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+
+        # Apply augmentation if enabled
+        if self.enable_augmentation and self.image_transforms is not None:
+            image_tensor = self.image_transforms(image_tensor)
+
+        return image_tensor
+
+    def close(self):
+        """Close all open zip files."""
+        self.zip_cache.close_all()
+
+
+def test_dataset():
+    """Test the dataset on a small subset."""
+    print("Testing RoboTwin VLA Dataset...")
+    print("=" * 60)
+
+    # Create dataset with test data
+    dataset = RoboTwinVLADataset(
+        dataset_root="/mnt/robotwin/dataset",
+        norm_stats_path="data/test_norm_stats.json",
+        action_horizon=50,
+        image_size=(320, 240),  # Native RoboTwin resolution
+        tasks=["adjust_bottle"],  # Single task for testing
+        variants=["clean_50"],
+        cache_size=5,
+        enable_augmentation=False,  # Disable for testing
+    )
+
+    print(f"\nDataset size: {len(dataset)}")
+
+    # Test loading a few samples including ones near the end of episodes
+    print("\nLoading sample data...")
+    for i in [0, 10, 100, len(dataset)-1]:
+        if i >= len(dataset):
+            continue
+
+        sample = dataset[i]
+
+        print(f"\nSample {i}:")
+        print(f"  Episode: {sample['episode_id']}, timestep: {sample['timestep']}")
+        print(f"  Task: {sample['task_description'][:80]}...")
+        print(f"  Robot type: {sample['robot_type']}")
+        print(f"  Discretized state shape: {sample['discretized_state'].shape}")
+        print(f"  Discretized state range: [{sample['discretized_state'].min()}, {sample['discretized_state'].max()}]")
+        print(f"  Normalized deltas shape: {sample['normalized_deltas'].shape}")
+        print(f"  Action tokens: {len(sample['action_tokens'])} tokens")
+        print(f"  Token range: [{min(sample['action_tokens'])}, {max(sample['action_tokens'])}]")
+        print(f"  Image shapes:")
+        print(f"    Left: {sample['left_camera'].shape}")
+        print(f"    Right: {sample['right_camera'].shape}")
+        print(f"    Head: {sample['head_camera'].shape}")
+        print(f"  Image value range: [{sample['head_camera'].min():.3f}, {sample['head_camera'].max():.3f}]")
+
+    dataset.close()
+
+    print("\n" + "=" * 60)
+    print("✓ Dataset test completed successfully!")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    test_dataset()
