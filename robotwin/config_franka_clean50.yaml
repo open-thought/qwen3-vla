@@ -10,7 +10,7 @@ new_vocab_size: 153984
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_franka_clean50.json
 episode_lengths_path: data/robotwin_episode_lengths_franka_clean50.json
-action_horizon: 50
+action_horizon: 16
 image_size:
 - 320
 - 240
@@ -102,7 +102,7 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: checkpoints/qwen3-vla-robotwin-franka-clean50
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-franka-clean50
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100

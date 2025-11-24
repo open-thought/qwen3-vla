@@ -25,7 +25,7 @@ python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions.hdf5 \
     --episode-lengths-output data/robotwin_episode_lengths.json \
-    --action-horizon 50
+    --action-horizon 16
 
 # Compute normalization statistics per robot type
 python compute_norm_stats.py \

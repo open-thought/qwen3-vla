@@ -26,7 +26,7 @@ python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions_test.hdf5 \
     --episode-lengths-output data/robotwin_episode_lengths_test.json \
-    --action-horizon 50 \
+    --action-horizon 16 \
     --robot-types franka \
     --variants clean_50 \
     --tasks adjust_bottle
@@ -101,7 +101,7 @@ python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions.hdf5 \
     --episode-lengths-output data/robotwin_episode_lengths.json \
-    --action-horizon 50
+    --action-horizon 16
 
 python compute_norm_stats.py \
     --delta-actions data/robotwin_delta_actions.hdf5 \
