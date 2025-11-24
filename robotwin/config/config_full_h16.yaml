@@ -1,0 +1,77 @@
+# Training Configuration for Qwen3-VLA
+# Full RoboTwin dataset - all robots, all variants, action_horizon=16
+
+# Model configuration
+model_name: Qwen/Qwen3-VL-2B-Instruct
+original_vocab_size: 151936
+new_vocab_size: 153984
+
+# Dataset configuration
+dataset_root: /mnt/robotwin/dataset
+norm_stats_path: data/robotwin_norm_stats_h16.json
+episode_lengths_path: data/robotwin_episode_lengths.json
+action_horizon: 16
+pad_action_horizon: false  # Use variable-length sequences for better data quality
+image_size:
+- 320
+- 240
+
+# Data filtering - Use ALL robot types, variants, and tasks (null = no filtering)
+robot_types: null
+variants: null
+tasks: null
+
+# Image augmentation
+enable_augmentation: true
+max_num_transforms: 3
+random_order: false
+val_use_augmentation: false
+
+# Training split
+validation_split: 0.05
+
+# Training hyperparameters
+batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-05
+weight_decay: 0.01
+max_grad_norm: 1.0
+max_steps: 500000
+warmup_steps: 2000
+
+# LoRA configuration
+use_lora: false
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+- q_proj
+- v_proj
+- k_proj
+- o_proj
+
+# Checkpointing and evaluation
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-full-h16
+save_interval: 10000
+val_interval: 5000
+max_val_batches: 100
+
+# DataLoader configuration
+num_workers: 8
+prefetch_factor: 2
+
+# WandB logging
+enable_wandb: true
+wandb_project: qwen3-vla-robotwin
+wandb_entity: null
+wandb_run_name: full-dataset-h16
+wandb_log_interval: 50
+
+# Mixed precision training (always uses bfloat16)
+use_amp: true
+
+# Seed for reproducibility
+seed: 42
+
+# Resume training
+resume_from_checkpoint: null
