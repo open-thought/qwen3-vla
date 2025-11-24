@@ -11,6 +11,7 @@ dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_test.json
 episode_lengths_path: data/robotwin_episode_lengths_test.json
 action_horizon: 50
+pad_action_horizon: false  # Whether to pad action sequences by repeating final state (true) or use variable-length sequences (false)
 image_size:
 - 320
 - 240

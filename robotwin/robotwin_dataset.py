@@ -58,8 +58,9 @@ class RoboTwinVLADataset(Dataset):
     - Current robot state: arm joints + gripper positions (discretized to 0-255)
     - Future delta action chunk (tokenized with FAST)
 
-    If timestep is near the end of episode, the final joint state is repeated
-    to ensure we always have action_horizon future predictions.
+    Padding behavior (controlled by pad_action_horizon):
+    - If True: Pad to fixed action_horizon by repeating final state when near episode end
+    - If False: Use variable-length sequences based on remaining timesteps
     """
 
     def __init__(
@@ -76,6 +77,7 @@ class RoboTwinVLADataset(Dataset):
         enable_augmentation: bool = False,
         max_num_transforms: int = 3,
         random_order: bool = False,
+        pad_action_horizon: bool = True,
     ):
         """
         Args:
@@ -91,9 +93,12 @@ class RoboTwinVLADataset(Dataset):
             enable_augmentation: Whether to apply image augmentation
             max_num_transforms: Maximum number of augmentations to apply
             random_order: Whether to apply augmentations in random order
+            pad_action_horizon: Whether to pad action sequences to action_horizon by repeating
+                final state (True) or use variable-length sequences based on remaining timesteps (False)
         """
         self.dataset_root = Path(dataset_root)
         self.action_horizon = action_horizon
+        self.pad_action_horizon = pad_action_horizon
         # Convert image_size to tuple (handles list from YAML config)
         if isinstance(image_size, (tuple, list)):
             self.image_size = tuple(image_size)
@@ -143,7 +148,6 @@ class RoboTwinVLADataset(Dataset):
 
         # Build list of valid (episode, timestep) pairs
         # Each episode contributes multiple samples (one per timestep)
-        # We can use ALL timesteps now since we'll pad at the end
         self.samples = []
         print("\nBuilding sample list...")
         for ep_meta in self.index.episodes:
@@ -159,7 +163,16 @@ class RoboTwinVLADataset(Dataset):
 
             num_timesteps = episode_lengths[episode_key]
 
-            for t in range(num_timesteps):
+            # Determine valid timestep range based on padding mode
+            if self.pad_action_horizon:
+                # With padding: use all timesteps except the last (need at least 1 future timestep)
+                max_timestep = num_timesteps - 1
+            else:
+                # Without padding: only use timesteps with full action_horizon available
+                # Need action_horizon future timesteps, so last valid t is num_timesteps - action_horizon - 1
+                max_timestep = max(0, num_timesteps - self.action_horizon)
+
+            for t in range(max_timestep):
                 self.samples.append((ep_meta, t))
 
         print(f"Total samples: {len(self.samples)}")
@@ -275,23 +288,31 @@ class RoboTwinVLADataset(Dataset):
         current_grippers = np.array([left_gripper, right_gripper], dtype=np.float32)
 
         # Get future states for delta actions
-        # If we don't have enough future timesteps, repeat the final state
-        future_end = min(timestep + 1 + self.action_horizon, num_timesteps)
-        future_states = full_joints[timestep+1:future_end]  # (num_available, 2*dof)
+        if self.pad_action_horizon:
+            # Pad to fixed action_horizon by repeating final state if needed
+            future_end = min(timestep + 1 + self.action_horizon, num_timesteps)
+            future_states = full_joints[timestep+1:future_end]  # (num_available, 2*dof)
 
-        # Pad with final state if needed
-        num_available = len(future_states)
-        if num_available < self.action_horizon:
-            # Repeat the final state to fill the action horizon
-            final_state = full_joints[-1:].repeat(self.action_horizon - num_available, axis=0)
-            future_states = np.concatenate([future_states, final_state], axis=0)
+            # Pad with final state if needed
+            num_available = len(future_states)
+            if num_available < self.action_horizon:
+                # Repeat the final state to fill the action horizon
+                final_state = full_joints[-1:].repeat(self.action_horizon - num_available, axis=0)
+                future_states = np.concatenate([future_states, final_state], axis=0)
 
-        # Now future_states has shape (action_horizon, 2*dof)
-        assert len(future_states) == self.action_horizon, \
-            f"Expected {self.action_horizon} future states, got {len(future_states)}"
+            # Now future_states has shape (action_horizon, 2*dof)
+            assert len(future_states) == self.action_horizon, \
+                f"Expected {self.action_horizon} future states, got {len(future_states)}"
+
+            actual_horizon = self.action_horizon
+        else:
+            # Use variable-length sequences based on remaining timesteps
+            num_available = min(self.action_horizon, num_timesteps - timestep - 1)
+            future_states = full_joints[timestep+1:timestep+1+num_available]  # (num_available, 2*dof)
+            actual_horizon = num_available
 
         # Compute delta actions
-        delta_actions = future_states - current_state[None, :]  # (action_horizon, 2*dof)
+        delta_actions = future_states - current_state[None, :]  # (actual_horizon, 2*dof)
         delta_actions = delta_actions.astype(np.float32)
 
         # Normalize state, grippers, and delta actions
@@ -337,6 +358,7 @@ class RoboTwinVLADataset(Dataset):
             # Metadata
             "episode_id": f"{ep_meta.task_name}_ep{ep_meta.episode_idx}",
             "timestep": timestep,
+            "actual_action_horizon": actual_horizon,  # Actual number of future timesteps used
         }
 
         return sample

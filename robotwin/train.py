@@ -56,6 +56,7 @@ def create_dataloaders(config: TrainingConfig):
         enable_augmentation=config.enable_augmentation,
         max_num_transforms=config.max_num_transforms,
         random_order=config.random_order,
+        pad_action_horizon=config.pad_action_horizon,
     )
 
     # Split into train/val
@@ -86,6 +87,7 @@ def create_dataloaders(config: TrainingConfig):
         enable_augmentation=config.val_use_augmentation,  # Usually False
         max_num_transforms=config.max_num_transforms,
         random_order=config.random_order,
+        pad_action_horizon=config.pad_action_horizon,
     )
 
     # Use same indices for validation
