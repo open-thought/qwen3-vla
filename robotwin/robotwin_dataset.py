@@ -58,9 +58,12 @@ class RoboTwinVLADataset(Dataset):
     - Current robot state: arm joints + gripper positions (discretized to 0-255)
     - Future delta action chunk (tokenized with FAST)
 
-    Padding behavior (controlled by pad_action_horizon):
-    - If True: Pad to fixed action_horizon by repeating final state when near episode end
-    - If False: Use variable-length sequences based on remaining timesteps
+    Action horizon behavior (controlled by pad_action_horizon):
+    - If True: Always generate exactly action_horizon predictions by repeating final state if needed
+    - If False: Generate variable-length sequences (1 to action_horizon) based on remaining timesteps
+
+    Note: All timesteps are included in both modes to ensure the model sees observations
+    from the entire episode, including near-end frames.
     """
 
     def __init__(
@@ -163,14 +166,10 @@ class RoboTwinVLADataset(Dataset):
 
             num_timesteps = episode_lengths[episode_key]
 
-            # Determine valid timestep range based on padding mode
-            if self.pad_action_horizon:
-                # With padding: use all timesteps except the last (need at least 1 future timestep)
-                max_timestep = num_timesteps - 1
-            else:
-                # Without padding: only use timesteps with full action_horizon available
-                # Need action_horizon future timesteps, so last valid t is num_timesteps - action_horizon - 1
-                max_timestep = max(0, num_timesteps - self.action_horizon)
+            # Use all timesteps except the last (need at least 1 future timestep for delta actions)
+            # Whether padding is enabled or not, we want to see observations from all timesteps
+            # With pad_action_horizon=False, timesteps near the end will have shorter action sequences
+            max_timestep = num_timesteps - 1
 
             for t in range(max_timestep):
                 self.samples.append((ep_meta, t))
