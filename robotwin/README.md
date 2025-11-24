@@ -196,14 +196,6 @@ variants: ["clean_50"]
 tasks: ["adjust_bottle", "click_bell"]
 ```
 
-## Tips
-
-- **Memory**: Batch size 8 requires ~40GB GPU memory. Reduce if needed.
-- **Speed**: ~1 step/sec on A100. Full training (~100k steps) takes ~27 hours.
-- **Augmentation**: Enable for training, disable for validation (default).
-- **LoRA**: Use `use_lora: true` for faster training with less memory.
-- **Validation**: Runs every 1000 steps on 5% of data.
-
 ## Monitoring
 
 Training metrics logged to WandB:

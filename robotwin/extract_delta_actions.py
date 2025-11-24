@@ -144,20 +144,26 @@ def extract_delta_actions(
     # Track episode lengths
     episode_lengths = {}
 
-    # Track open zip files
-    open_zips = {}
+    # Track current open zip file (only one at a time)
+    current_zip_path = None
+    current_zf = None
 
     print(f"\nExtracting delta actions from {len(index.episodes)} episodes...")
 
     try:
         for ep_meta in tqdm(index.episodes, desc="Processing episodes"):
-            # Get or open zip file
-            if ep_meta.zip_path not in open_zips:
-                open_zips[ep_meta.zip_path] = zipfile.ZipFile(ep_meta.zip_path, "r")
-            zf = open_zips[ep_meta.zip_path]
+            # Check if we need to switch to a new zip file
+            if ep_meta.zip_path != current_zip_path:
+                # Close previous zip file if open
+                if current_zf is not None:
+                    current_zf.close()
+
+                # Open new zip file
+                current_zf = zipfile.ZipFile(ep_meta.zip_path, "r")
+                current_zip_path = ep_meta.zip_path
 
             # Extract delta actions for this episode
-            episode_data, num_timesteps = extract_episode_delta_actions(zf, ep_meta, action_horizon)
+            episode_data, num_timesteps = extract_episode_delta_actions(current_zf, ep_meta, action_horizon)
 
             # Create unique episode key
             episode_key = f"{ep_meta.task_name}/{ep_meta.robot_type}_{ep_meta.variant}/episode{ep_meta.episode_idx}"
@@ -175,9 +181,9 @@ def extract_delta_actions(
             rd["grippers"].append(episode_data["grippers"])
 
     finally:
-        # Close all zip files
-        for zf in open_zips.values():
-            zf.close()
+        # Close the last zip file if still open
+        if current_zf is not None:
+            current_zf.close()
 
     # Concatenate data per robot type
     print("\nConcatenating data per robot type...")
