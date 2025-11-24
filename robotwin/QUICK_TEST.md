@@ -4,7 +4,7 @@ This guide walks through testing the training pipeline on a small subset of data
 
 ## Test Configuration
 
-The `config_test.yaml` file is pre-configured for quick testing:
+The `config/config_test.yaml` file is pre-configured for quick testing:
 
 - **Robot**: Franka only
 - **Task**: adjust_bottle only
@@ -42,7 +42,7 @@ This creates:
 - `data/robotwin_episode_lengths_test.json` - Actual episode lengths
 - `data/robotwin_norm_stats_test.json` - Normalization statistics for Franka only
 
-The test configuration (`config_test.yaml`) is already configured to use these files.
+The test configuration (`config/config_test.yaml`) is already configured to use these files.
 
 ## Step 2: Test the Pipeline
 
@@ -67,7 +67,7 @@ All 6 tests should pass.
 Launch training with the test configuration:
 
 ```bash
-python train.py --config config_test.yaml
+python train.py --config config/config_test.yaml
 ```
 
 Monitor the logs for:

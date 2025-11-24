@@ -236,12 +236,52 @@ def train(config: TrainingConfig):
     print(f"  Trainable: {trainable_params:,}")
     print(f"  Trainable %: {100 * trainable_params / total_params:.2f}%")
 
-    # Create optimizer
-    optimizer = AdamW(
-        model.model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    # Create optimizer with parameter groups
+    # Use different learning rates for vision tower if specified
+    if config.vision_lr is not None:
+        print(f"\nUsing separate learning rates:")
+        print(f"  Vision tower LR: {config.vision_lr:.2e}")
+        print(f"  Other modules LR: {config.learning_rate:.2e}")
+
+        # Separate vision parameters from other parameters
+        vision_params = []
+        other_params = []
+
+        for name, param in model.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "visual" in name:
+                vision_params.append(param)
+            else:
+                other_params.append(param)
+
+        vision_count = sum(p.numel() for p in vision_params)
+        other_count = sum(p.numel() for p in other_params)
+        print(f"  Vision parameters: {vision_count:,}")
+        print(f"  Other parameters: {other_count:,}")
+
+        # Create parameter groups with different learning rates
+        optimizer_grouped_parameters = [
+            {
+                "params": other_params,
+                "lr": config.learning_rate,
+                "weight_decay": config.weight_decay,
+            },
+            {
+                "params": vision_params,
+                "lr": config.vision_lr,
+                "weight_decay": config.weight_decay,
+            },
+        ]
+
+        optimizer = AdamW(optimizer_grouped_parameters)
+    else:
+        # Use single learning rate for all parameters
+        optimizer = AdamW(
+            model.model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
 
     # Create scheduler
     num_training_steps = config.max_steps
@@ -305,19 +345,28 @@ def train(config: TrainingConfig):
         # Logging
         if (step + 1) % config.wandb_log_interval == 0:
             avg_loss = running_loss / config.wandb_log_interval
-            lr = scheduler.get_last_lr()[0]
+            lrs = scheduler.get_last_lr()
 
+            # Display primary learning rate in progress bar
             pbar.set_postfix({
                 "loss": f"{avg_loss:.4f}",
-                "lr": f"{lr:.2e}",
+                "lr": f"{lrs[0]:.2e}",
             })
 
             if config.enable_wandb and WANDB_AVAILABLE:
-                wandb.log({
+                log_dict = {
                     "train/loss": avg_loss,
-                    "train/learning_rate": lr,
                     "train/step": global_step,
-                }, step=global_step)
+                }
+
+                # Log all learning rates if using parameter groups
+                if len(lrs) > 1:
+                    log_dict["train/learning_rate_other"] = lrs[0]
+                    log_dict["train/learning_rate_vision"] = lrs[1]
+                else:
+                    log_dict["train/learning_rate"] = lrs[0]
+
+                wandb.log(log_dict, step=global_step)
 
             running_loss = 0
 

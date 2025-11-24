@@ -42,6 +42,7 @@ class TrainingConfig:
     batch_size: int = 8
     gradient_accumulation_steps: int = 4  # Effective batch size: 32
     learning_rate: float = 2e-5
+    vision_lr: Optional[float] = None  # Optional separate LR for vision tower, defaults to learning_rate
     weight_decay: float = 1e-2
     max_grad_norm: float = 1.0
     max_steps: int = 100000
