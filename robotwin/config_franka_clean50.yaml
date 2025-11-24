@@ -88,7 +88,7 @@ learning_rate: 2.0e-05
 weight_decay: 0.01
 max_grad_norm: 1.0
 max_steps: 500000
-warmup_steps: 5000
+warmup_steps: 1000
 
 # LoRA configuration
 use_lora: false
