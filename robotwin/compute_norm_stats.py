@@ -1,7 +1,7 @@
 """
 Compute normalization statistics from extracted delta actions.
 
-For each robot type, computes 1% and 99% percentiles for:
+For each robot type, computes percentiles (q01, q99) and extrema (min, max) for:
 - Robot states (current joint positions)
 - Delta actions (future movements)
 - Gripper states
@@ -57,9 +57,10 @@ def compute_statistics(delta_actions_path: str, output_json: str):
             # Shape: (2*dof,) - percentiles computed across all samples
             state_q01 = np.percentile(states, 1, axis=0)
             state_q99 = np.percentile(states, 99, axis=0)
+            state_min = np.min(states, axis=0)
+            state_max = np.max(states, axis=0)
 
-            print(f"  State range (q01 to q99):")
-            print(f"    Min: {state_q01.min():.4f}, Max: {state_q99.max():.4f}")
+            print(f"  State range: min={state_min.min():.4f}, q01={state_q01.min():.4f}, q99={state_q99.max():.4f}, max={state_max.max():.4f}")
 
             # Compute percentiles for delta actions
             # Flatten across samples and time steps, then compute per joint
@@ -67,18 +68,20 @@ def compute_statistics(delta_actions_path: str, output_json: str):
             deltas_flat = deltas.reshape(-1, deltas.shape[-1])
             delta_q01 = np.percentile(deltas_flat, 1, axis=0)
             delta_q99 = np.percentile(deltas_flat, 99, axis=0)
+            delta_min = np.min(deltas_flat, axis=0)
+            delta_max = np.max(deltas_flat, axis=0)
 
-            print(f"  Delta action range (q01 to q99):")
-            print(f"    Min: {delta_q01.min():.4f}, Max: {delta_q99.max():.4f}")
+            print(f"  Delta action range: min={delta_min.min():.4f}, q01={delta_q01.min():.4f}, q99={delta_q99.max():.4f}, max={delta_max.max():.4f}")
 
             # Compute percentiles for grippers
             # Shape: (2,) - one for left, one for right gripper
             gripper_q01 = np.percentile(grippers, 1, axis=0)
             gripper_q99 = np.percentile(grippers, 99, axis=0)
+            gripper_min = np.min(grippers, axis=0)
+            gripper_max = np.max(grippers, axis=0)
 
-            print(f"  Gripper range (q01 to q99):")
-            print(f"    Left: [{gripper_q01[0]:.4f}, {gripper_q99[0]:.4f}]")
-            print(f"    Right: [{gripper_q01[1]:.4f}, {gripper_q99[1]:.4f}]")
+            print(f"  Gripper left:  min={gripper_min[0]:.4f}, q01={gripper_q01[0]:.4f}, q99={gripper_q99[0]:.4f}, max={gripper_max[0]:.4f}")
+            print(f"  Gripper right: min={gripper_min[1]:.4f}, q01={gripper_q01[1]:.4f}, q99={gripper_q99[1]:.4f}, max={gripper_max[1]:.4f}")
 
             # Store statistics
             stats[robot_type] = {
@@ -90,14 +93,20 @@ def compute_statistics(delta_actions_path: str, output_json: str):
                 "state": {
                     "q01": state_q01.tolist(),
                     "q99": state_q99.tolist(),
+                    "min": state_min.tolist(),
+                    "max": state_max.tolist(),
                 },
                 "delta_actions": {
                     "q01": delta_q01.tolist(),
                     "q99": delta_q99.tolist(),
+                    "min": delta_min.tolist(),
+                    "max": delta_max.tolist(),
                 },
                 "grippers": {
                     "q01": gripper_q01.tolist(),
                     "q99": gripper_q99.tolist(),
+                    "min": gripper_min.tolist(),
+                    "max": gripper_max.tolist(),
                 },
             }
 
@@ -122,12 +131,18 @@ def compute_statistics(delta_actions_path: str, output_json: str):
     print("  state/")
     print("    - q01: 1% percentile of current joint positions (2*dof,)")
     print("    - q99: 99% percentile of current joint positions (2*dof,)")
+    print("    - min: minimum of current joint positions (2*dof,)")
+    print("    - max: maximum of current joint positions (2*dof,)")
     print("  delta_actions/")
     print("    - q01: 1% percentile of delta movements (2*dof,)")
     print("    - q99: 99% percentile of delta movements (2*dof,)")
+    print("    - min: minimum of delta movements (2*dof,)")
+    print("    - max: maximum of delta movements (2*dof,)")
     print("  grippers/")
     print("    - q01: 1% percentile of gripper states (2,)")
     print("    - q99: 99% percentile of gripper states (2,)")
+    print("    - min: minimum of gripper states (2,)")
+    print("    - max: maximum of gripper states (2,)")
 
 
 def main():
