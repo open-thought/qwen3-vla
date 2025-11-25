@@ -32,6 +32,7 @@ import argparse
 import yaml
 import numpy as np
 import importlib
+import subprocess
 from datetime import datetime
 
 # RoboTwin imports
@@ -39,8 +40,16 @@ from envs.utils.create_actor import UnStableError
 from generate_episode_instructions import generate_episode_descriptions
 
 # Local imports
-from eval.qwen3_vla_policy import Qwen3VLAPolicy, get_model, eval as policy_eval, reset_model
+from eval.qwen3_vla_policy import Qwen3VLAPolicy, get_model, reset_model
 from eval.video_recorder import MultiCameraRecorder, get_observer_rgb
+
+
+def get_camera_config(camera_type: str) -> dict:
+    """Load camera configuration from RoboTwin."""
+    camera_config_path = ROBOTWIN_DIR / "task_config" / "_camera_config.yml"
+    with open(camera_config_path, "r") as f:
+        camera_configs = yaml.safe_load(f)
+    return camera_configs.get(camera_type, {"w": 320, "h": 240})
 
 
 def class_decorator(task_name: str):
@@ -124,6 +133,8 @@ def run_evaluation(
     record_video: bool = True,
     video_output_dir: str = "eval_videos",
     seed: int = 42,
+    execute_steps: int = 1,
+    use_builtin_video: bool = False,
 ):
     """
     Run evaluation on a single task.
@@ -134,9 +145,12 @@ def run_evaluation(
         num_episodes: Number of episodes to evaluate
         task_config_name: Task configuration name
         instruction_type: Type of instruction ("seen" or "unseen")
-        record_video: Whether to record videos
+        record_video: Whether to record videos (multi-camera)
         video_output_dir: Directory for video output
         seed: Random seed
+        execute_steps: Number of action steps to execute before re-predicting
+        use_builtin_video: Use RoboTwin's built-in video recording (head camera only,
+                           records every simulation step inside take_action)
 
     Returns:
         Dictionary with evaluation results
@@ -165,13 +179,26 @@ def run_evaluation(
     # Load task environment
     TASK_ENV = class_decorator(task_name)
 
-    # Video recorder
+    # Video recorder (multi-camera)
     recorder = None
-    if record_video:
+    if record_video and not use_builtin_video:
         recorder = MultiCameraRecorder(
             output_dir=f"{video_output_dir}/{task_name}",
             fps=10,
         )
+
+    # Built-in RoboTwin video recording setup
+    builtin_video_dir = None
+    video_size = None
+    if use_builtin_video:
+        builtin_video_dir = Path(video_output_dir) / task_name
+        builtin_video_dir.mkdir(parents=True, exist_ok=True)
+        # Get camera resolution for ffmpeg
+        head_camera_type = config.get("camera", {}).get("head_camera_type", "default")
+        camera_cfg = get_camera_config(head_camera_type)
+        video_size = f"{camera_cfg['w']}x{camera_cfg['h']}"
+        # Set in config so TASK_ENV knows about it
+        config["eval_video_save_dir"] = str(builtin_video_dir)
 
     # Load step limit
     step_limit_path = ROBOTWIN_DIR / "task_config" / "_eval_step_limit.yml"
@@ -216,9 +243,32 @@ def run_evaluation(
         instruction = np.random.choice(results[0][instruction_type])
         TASK_ENV.set_instruction(instruction)
 
-        # Start video recording
+        # Start video recording (multi-camera)
         if recorder:
             recorder.start_episode(episode_count, task_name)
+
+        # Start built-in video recording (head camera, high frame rate)
+        ffmpeg_process = None
+        if use_builtin_video and builtin_video_dir:
+            video_path = builtin_video_dir / f"episode{episode_count}.mp4"
+            ffmpeg_process = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel", "error",
+                    "-f", "rawvideo",
+                    "-pixel_format", "rgb24",
+                    "-video_size", video_size,
+                    "-framerate", "10",
+                    "-i", "-",
+                    "-pix_fmt", "yuv420p",
+                    "-vcodec", "libx264",
+                    "-crf", "23",
+                    str(video_path),
+                ],
+                stdin=subprocess.PIPE,
+            )
+            TASK_ENV._set_eval_video_ffmpeg(ffmpeg_process)
 
         # Reset model state
         reset_model(model)
@@ -254,8 +304,37 @@ def run_evaluation(
                     step=TASK_ENV.take_action_cnt,
                 )
 
-            # Get action from policy
-            observation = policy_eval(TASK_ENV, model, observation)
+            # Get action from policy and execute
+            # Note: policy_eval executes `execute_steps` actions internally
+            # For accurate video recording with execute_steps > 1, we record after each action
+            instruction = TASK_ENV.get_instruction()
+            actions = model.get_action(observation, instruction)
+
+            steps_to_execute = min(execute_steps, len(actions))
+            for i in range(steps_to_execute):
+                TASK_ENV.take_action(actions[i], action_type='qpos')
+                observation = TASK_ENV.get_obs()
+
+                # Record frame after each action (not just at policy call)
+                if recorder and i < steps_to_execute - 1:  # Skip last frame, it's recorded at loop start
+                    obs_data = observation["observation"]
+                    observer_rgb = None
+                    if "third_view_rgb" in observation:
+                        observer_rgb = observation["third_view_rgb"]
+                    else:
+                        observer_rgb = get_observer_rgb(TASK_ENV)
+
+                    recorder.add_frame(
+                        head_rgb=obs_data["head_camera"]["rgb"],
+                        left_rgb=obs_data["left_camera"]["rgb"],
+                        right_rgb=obs_data["right_camera"]["rgb"],
+                        observer_rgb=observer_rgb,
+                        step=TASK_ENV.take_action_cnt,
+                    )
+
+                if TASK_ENV.eval_success:
+                    break
+
             step += 1
 
             # Print progress
@@ -269,7 +348,7 @@ def run_evaluation(
         else:
             print(f"\n  Result: \033[91mFAILED\033[0m")
 
-        # End video recording
+        # End video recording (multi-camera)
         if recorder:
             # Add final frame with success indicator
             obs_data = observation["observation"]
@@ -284,6 +363,17 @@ def run_evaluation(
             )
             recorder.end_episode(success)
 
+        # End built-in video recording
+        if ffmpeg_process:
+            TASK_ENV._del_eval_video_ffmpeg()
+            status = "success" if success else "fail"
+            # Rename video file to include success/fail status
+            old_path = builtin_video_dir / f"episode{episode_count}.mp4"
+            new_path = builtin_video_dir / f"episode{episode_count}_{status}.mp4"
+            if old_path.exists():
+                old_path.rename(new_path)
+                print(f"  Video saved: {new_path}")
+
         TASK_ENV.close_env()
         episode_count += 1
 
@@ -293,6 +383,9 @@ def run_evaluation(
     # Cleanup
     if recorder:
         recorder.close()
+
+    # Print timing statistics
+    model.print_timing_stats()
 
     results = {
         "task_name": task_name,
@@ -380,6 +473,11 @@ def main():
         help="Disable video recording"
     )
     parser.add_argument(
+        "--builtin_video",
+        action="store_true",
+        help="Use RoboTwin's built-in video recording (head camera only, records every sim step)"
+    )
+    parser.add_argument(
         "--video_output_dir",
         type=str,
         default="eval_videos",
@@ -389,6 +487,17 @@ def main():
     # Other arguments
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--device", type=str, default="cuda:1", help="Device to use (e.g., cuda:0, cuda:1)")
+    parser.add_argument(
+        "--execute_steps", "-e",
+        type=int,
+        default=1,
+        help="Number of action steps to execute before re-predicting (1=closed-loop, action_horizon=open-loop)"
+    )
+    parser.add_argument(
+        "--debug_actions",
+        action="store_true",
+        help="Print decoded action values for debugging"
+    )
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -418,6 +527,7 @@ def main():
         "action_horizon": args.action_horizon,
         "robot_type": args.robot_type,
         "device": args.device,
+        "debug_actions": args.debug_actions,
     }
     model = get_model(model_args)
 
@@ -433,6 +543,8 @@ def main():
             record_video=record_video,
             video_output_dir=args.video_output_dir,
             seed=args.seed,
+            execute_steps=args.execute_steps,
+            use_builtin_video=args.builtin_video,
         )
         all_results[task_name] = results
 

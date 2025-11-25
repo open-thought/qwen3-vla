@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import numpy as np
 import torch
+import time
 from PIL import Image
 from typing import Optional
 from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -48,6 +49,8 @@ class Qwen3VLAPolicy:
         robot_type: str = "aloha-agilex",
         device: str = "cuda:0",
         max_new_tokens: int = 150,  # Typical FAST sequences are 91-99 tokens
+        debug_timing: bool = True,  # Print generation timing info
+        debug_actions: bool = False,  # Print decoded action values
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -59,12 +62,21 @@ class Qwen3VLAPolicy:
             robot_type: Robot type for normalization (e.g., "aloha-agilex")
             device: Device to run model on
             max_new_tokens: Maximum tokens to generate
+            debug_timing: Print generation timing info
+            debug_actions: Print decoded action values
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
         self.robot_type = robot_type
         self.device = device
         self.max_new_tokens = max_new_tokens
+        self.debug_timing = debug_timing
+        self.debug_actions = debug_actions
+
+        # Timing statistics
+        self.total_generate_time = 0.0
+        self.total_tokens_generated = 0
+        self.num_generate_calls = 0
 
         print(f"Loading Qwen3-VLA from {checkpoint_path}...")
 
@@ -109,6 +121,26 @@ class Qwen3VLAPolicy:
         """Reset policy state at the start of a new episode."""
         self.current_qpos = None
         self.step_count = 0
+
+    def print_timing_stats(self):
+        """Print timing statistics summary."""
+        if self.num_generate_calls > 0:
+            avg_time = self.total_generate_time / self.num_generate_calls * 1000
+            avg_tokens = self.total_tokens_generated / self.num_generate_calls
+            avg_tok_per_sec = self.total_tokens_generated / self.total_generate_time if self.total_generate_time > 0 else 0
+            print(f"\n  Timing Summary:")
+            print(f"    Total generate calls: {self.num_generate_calls}")
+            print(f"    Total tokens generated: {self.total_tokens_generated}")
+            print(f"    Total generate time: {self.total_generate_time:.2f}s")
+            print(f"    Avg time per call: {avg_time:.1f}ms")
+            print(f"    Avg tokens per call: {avg_tokens:.1f}")
+            print(f"    Avg throughput: {avg_tok_per_sec:.1f} tok/s")
+
+    def reset_timing_stats(self):
+        """Reset timing statistics."""
+        self.total_generate_time = 0.0
+        self.total_tokens_generated = 0
+        self.num_generate_calls = 0
 
     def _prepare_images(self, observation: dict) -> list:
         """
@@ -263,17 +295,42 @@ State: [{state_str}]"""
 
         # Generate action tokens
         with torch.no_grad():
+            torch.cuda.synchronize() if self.device.startswith("cuda") else None
+            start_time = time.perf_counter()
+
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,  # Greedy decoding for actions
+                temperature=None,  # Not used with greedy decoding
+                top_p=None,        # Not used with greedy decoding
+                top_k=None,        # Not used with greedy decoding
                 pad_token_id=self.processor.tokenizer.pad_token_id,
-                eos_token_id=self.EOT_TOKEN_ID,  # Stop at EOT token
+                eos_token_id=[self.EOT_TOKEN_ID],  # Stop at EOT token
+                use_cache=True,  # Enable KV caching (should be default, but explicit)
             )
+
+            torch.cuda.synchronize() if self.device.startswith("cuda") else None
+            generate_time = time.perf_counter() - start_time
 
         # Extract generated tokens (remove input tokens)
         input_len = inputs["input_ids"].shape[1]
         generated_tokens = outputs[0, input_len:].cpu().tolist()
+        num_tokens = len(generated_tokens)
+
+        # Update timing statistics
+        self.total_generate_time += generate_time
+        self.total_tokens_generated += num_tokens
+        self.num_generate_calls += 1
+
+        if self.debug_timing:
+            tokens_per_sec = num_tokens / generate_time if generate_time > 0 else 0
+            avg_tokens_per_sec = self.total_tokens_generated / self.total_generate_time if self.total_generate_time > 0 else 0
+            # Count FAST tokens vs other tokens
+            num_fast = sum(1 for t in generated_tokens if self.FAST_TOKEN_START <= t <= self.FAST_TOKEN_END)
+            num_eot = sum(1 for t in generated_tokens if t == self.EOT_TOKEN_ID)
+            print(f"    Generate: {input_len} prompt + {num_tokens} output ({num_fast} FAST, {num_eot} EOT) "
+                  f"in {generate_time*1000:.0f}ms ({tokens_per_sec:.1f} tok/s)")
 
         # Filter to FAST token range, stopping at EOT token
         fast_tokens = []
@@ -282,6 +339,16 @@ State: [{state_str}]"""
                 break  # Stop at EOT token
             if self.FAST_TOKEN_START <= t <= self.FAST_TOKEN_END:
                 fast_tokens.append(t)
+
+        if self.debug_actions:
+            # Print state info to verify it's changing between calls
+            print(f"    State (first 6): [{', '.join(f'{x:.4f}' for x in state[:6])}]")
+            print(f"    Discretized (first 6): [{', '.join(str(int(x)) for x in discretized_state[:6])}]")
+            tokens_no_offset = [t - self.FAST_TOKEN_START for t in fast_tokens]
+            print(f"    FAST tokens ({len(fast_tokens)}): {tokens_no_offset}")
+            if self.num_generate_calls <= 2:
+                # Print full prompt on first few calls
+                print(f"    Prompt: {prompt_text}")
 
         if len(fast_tokens) == 0:
             print("Warning: No FAST tokens generated, returning zero actions")
@@ -310,6 +377,12 @@ State: [{state_str}]"""
 
         # Convert delta actions to absolute qpos
         actions = self._delta_to_absolute(delta_actions, grippers)
+
+        if self.debug_actions:
+            print(f"    Delta actions shape: {delta_actions.shape}, range: [{delta_actions.min():.4f}, {delta_actions.max():.4f}]")
+            print(f"    Delta actions (decoded from model):")
+            for i, delta in enumerate(delta_actions):
+                print(f"      Delta[{i:2d}]: [{', '.join(f'{x:8.4f}' for x in delta)}]")
 
         self.step_count += 1
 
@@ -393,6 +466,7 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     action_horizon = usr_args.get("action_horizon", 16)
     robot_type = usr_args.get("robot_type", "aloha-agilex")
     device = usr_args.get("device", "cuda:0")
+    debug_actions = usr_args.get("debug_actions", False)
 
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
@@ -400,12 +474,13 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         action_horizon=action_horizon,
         robot_type=robot_type,
         device=device,
+        debug_actions=debug_actions,
     )
 
     return _policy_instance
 
 
-def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict):
+def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict, execute_steps: int = 1):
     """
     Run one evaluation step.
 
@@ -413,6 +488,13 @@ def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict):
         TASK_ENV: RoboTwin task environment
         model: Qwen3VLAPolicy instance
         observation: Current observation
+        execute_steps: Number of action steps to execute before re-predicting.
+                       1 = closed-loop (re-predict after each step)
+                       action_horizon = open-loop (execute full chunk)
+                       Default: 1 (closed-loop for better accuracy)
+
+    Returns:
+        Updated observation after executing actions
     """
     # Get instruction from environment
     instruction = TASK_ENV.get_instruction()
@@ -420,9 +502,11 @@ def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict):
     # Get actions from model
     actions = model.get_action(observation, instruction)
 
-    # Execute all action steps
-    for action in actions:
-        TASK_ENV.take_action(action, action_type='qpos')
+    # Execute only the first `execute_steps` actions, then return for re-prediction
+    steps_to_execute = min(execute_steps, len(actions))
+
+    for i in range(steps_to_execute):
+        TASK_ENV.take_action(actions[i], action_type='qpos')
         observation = TASK_ENV.get_obs()
 
         # Check for early success
