@@ -13,7 +13,6 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from collections import defaultdict
 from typing import List, Optional
 
 import h5py
@@ -147,19 +146,7 @@ def compute_idle_masks(
     print(f"Idle frames (max_delta < {idle_threshold}): {idle_frames} ({idle_frames / total_frames * 100:.1f}%)")
     print(f"Active frames: {active_frames} ({active_frames / total_frames * 100:.1f}%)")
     print()
-
-    # Per-episode statistics
-    episodes_with_idle = sum(1 for ep_key, valid in valid_timesteps.items()
-                             if len(valid) < sum(1 for _ in range(1)))  # This needs fixing
-
-    # Calculate average idle percentage per episode
-    idle_percentages = []
-    for ep_key, valid in valid_timesteps.items():
-        # We need episode length to calculate percentage
-        # For now, estimate from the max timestep in valid list + some margin
-        pass
-
-    print(f"\nOutput saved to: {output_path}")
+    print(f"Output saved to: {output_path}")
     print(f"  Episodes: {len(valid_timesteps)}")
     print(f"  Format: {{episode_key: [list of valid timestep indices]}}")
 
