@@ -25,16 +25,21 @@ class VLADataCollator:
         processor,
         action_token_start: int = 151936,  # First FAST token ID
         action_token_end: int = 153983,    # Last FAST token ID
+        add_eot_token: bool = True,        # Add EOT token after action sequence
     ):
         """
         Args:
             processor: Qwen3VL processor for tokenizing and preparing inputs
             action_token_start: First token ID in FAST vocabulary
             action_token_end: Last token ID in FAST vocabulary
+            add_eot_token: Whether to append EOT token after action sequence
         """
         self.processor = processor
         self.action_token_start = action_token_start
         self.action_token_end = action_token_end
+        self.add_eot_token = add_eot_token
+        # Use <|im_end|> as EOT token (ID 151645 in Qwen3)
+        self.eot_token_id = processor.tokenizer.eos_token_id
 
     def __call__(self, samples: List[Dict]) -> Dict[str, torch.Tensor]:
         """
@@ -109,11 +114,16 @@ State: [{state_str}]"""
             # Get action tokens for this sample
             action_tokens = torch.tensor(action_token_sequences[i], dtype=torch.long)
 
-            # Concatenate prompt + action tokens
+            # Optionally append EOT token after action sequence
+            if self.add_eot_token:
+                eot_token = torch.tensor([self.eot_token_id], dtype=torch.long)
+                action_tokens = torch.cat([action_tokens, eot_token])
+
+            # Concatenate prompt + action tokens (+ EOT if enabled)
             full_input_ids = torch.cat([prompt_ids, action_tokens])
             full_attention_mask = torch.cat([prompt_mask, torch.ones_like(action_tokens)])
 
-            # Create labels: -100 for prompt (don't compute loss), actual tokens for actions
+            # Create labels: -100 for prompt (don't compute loss), actual tokens for actions (+ EOT)
             prompt_labels = torch.full_like(prompt_ids, -100)
             full_labels = torch.cat([prompt_labels, action_tokens])
 

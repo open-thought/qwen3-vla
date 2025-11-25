@@ -7,6 +7,7 @@ Trains a vision-language-action model by extending Qwen3-VL with FAST action tok
 import argparse
 import os
 import random
+import re
 from pathlib import Path
 
 import numpy as np
@@ -221,14 +222,19 @@ def train(config: TrainingConfig):
 
     # Create model
     print("\nInitializing model...")
-    model = Qwen3VLAModel(
-        model_name=config.model_name,
-        use_lora=config.use_lora,
-        lora_r=config.lora_r,
-        lora_alpha=config.lora_alpha,
-        lora_target_modules=config.lora_target_modules,
-        lora_dropout=config.lora_dropout,
-    )
+    if config.resume_from_checkpoint:
+        # Load model from checkpoint
+        print(f"Loading model from checkpoint: {config.resume_from_checkpoint}")
+        model = Qwen3VLAModel.from_pretrained(config.resume_from_checkpoint)
+    else:
+        model = Qwen3VLAModel(
+            model_name=config.model_name,
+            use_lora=config.use_lora,
+            lora_r=config.lora_r,
+            lora_alpha=config.lora_alpha,
+            lora_target_modules=config.lora_target_modules,
+            lora_dropout=config.lora_dropout,
+        )
 
     # Count parameters
     total_params = sum(p.numel() for p in model.model.parameters())
@@ -297,13 +303,23 @@ def train(config: TrainingConfig):
     start_step = 0
     if config.resume_from_checkpoint:
         print(f"\nResuming from checkpoint: {config.resume_from_checkpoint}")
-        state_path = Path(config.resume_from_checkpoint) / "training_state.pt"
+        checkpoint_path = Path(config.resume_from_checkpoint)
+        # State file is saved as step_{step}_state.pt alongside the checkpoint directory
+        state_path = checkpoint_path.parent / f"{checkpoint_path.name}_state.pt"
         if state_path.exists():
             state = torch.load(state_path)
             start_step = state["step"]
             optimizer.load_state_dict(state["optimizer_state_dict"])
             scheduler.load_state_dict(state["scheduler_state_dict"])
-            print(f"Resumed from step {start_step}")
+            print(f"Resumed optimizer/scheduler from step {start_step}")
+        else:
+            # Try to extract step from checkpoint directory name
+            match = re.search(r'step_(\d+)', checkpoint_path.name)
+            if match:
+                start_step = int(match.group(1))
+                print(f"Warning: State file {state_path} not found, starting from step {start_step} without optimizer state")
+            else:
+                print(f"Warning: Could not determine step from checkpoint path, starting from step 0")
 
     # Training loop
     print("\n" + "=" * 60)
