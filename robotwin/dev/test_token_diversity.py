@@ -6,11 +6,11 @@ Checks that different samples produce different FAST tokens, not always the same
 
 Usage:
     python dev/test_token_diversity.py                        # No filtering
-    python dev/test_token_diversity.py --idle-std-threshold 0.16  # Filter idle frames
+    python dev/test_token_diversity.py --idle-threshold 0.001  # Filter idle frames
 
 Note on thresholds:
-    - Idle frames have std(normalized_deltas) ~ 0.152
-    - Use --idle-std-threshold 0.16 to filter idle frames effectively
+    - Idle frames have max(abs(delta_actions)) ~ 0 (raw, unnormalized)
+    - Use --idle-threshold 0.001 to filter idle frames effectively
 """
 
 import argparse
@@ -28,11 +28,12 @@ from robotwin_dataset import RoboTwinVLADataset
 def main():
     parser = argparse.ArgumentParser(description="Test action token diversity")
     parser.add_argument(
-        "--idle-std-threshold",
+        "--idle-threshold",
         type=float,
         default=0.0,
-        help="Filter samples where std(normalized_deltas) < threshold. "
-             "Idle frames have std ~0.152, so use 0.16 to filter. (default: 0.0 = disabled)",
+        help="Filter samples where max(abs(delta_actions)) < threshold. "
+             "Uses raw (unnormalized) delta actions. Use 0.001 to filter idle frames. "
+             "(default: 0.0 = disabled)",
     )
     parser.add_argument(
         "--num-samples",
@@ -57,8 +58,8 @@ def main():
     )
 
     print(f'Dataset size: {len(dataset)}')
-    if args.idle_std_threshold > 0:
-        print(f'Idle std threshold: {args.idle_std_threshold}')
+    if args.idle_threshold > 0:
+        print(f'Idle threshold: {args.idle_threshold} (on raw delta actions)')
     print()
 
     # Collect token sequences from multiple samples
@@ -81,11 +82,11 @@ def main():
         sample = dataset[i]
         total_checked += 1
 
-        # Check idle std threshold if enabled
-        if args.idle_std_threshold > 0:
-            normalized_deltas = sample['normalized_deltas']
-            delta_std = normalized_deltas.std()
-            if delta_std < args.idle_std_threshold:
+        # Check idle threshold if enabled (using raw delta actions)
+        if args.idle_threshold > 0:
+            delta_actions = sample['delta_actions']
+            max_delta = np.abs(delta_actions).max()
+            if max_delta < args.idle_threshold:
                 idle_rejected += 1
                 continue
 
@@ -107,7 +108,7 @@ def main():
     print("=" * 70)
 
     # Show idle filtering stats
-    if args.idle_std_threshold > 0:
+    if args.idle_threshold > 0:
         print(f"Samples checked: {total_checked}")
         print(f"Idle samples rejected: {idle_rejected} ({idle_rejected/total_checked*100:.1f}%)")
         print(f"Active samples kept: {num_samples} ({num_samples/total_checked*100:.1f}%)")

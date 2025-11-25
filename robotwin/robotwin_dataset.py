@@ -385,7 +385,9 @@ class RoboTwinVLADataset(Dataset):
             # Action targets
             "action_tokens": action_tokens,  # List of token IDs
 
-            # Normalized values (for verification/debugging)
+            # Raw and normalized values (for verification/debugging)
+            "state": current_state,  # Unnormalized state (joint positions)
+            "delta_actions": delta_actions,  # Unnormalized delta actions
             "normalized_state": normalized_state,
             "normalized_deltas": normalized_deltas,
 
