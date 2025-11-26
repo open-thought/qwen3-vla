@@ -79,7 +79,7 @@ def compute_idle_masks(
                 current_zf = zipfile.ZipFile(ep_meta.zip_path, "r")
                 current_zip_path = ep_meta.zip_path
 
-            # Load episode joint data
+            # Load episode joint+gripper data
             try:
                 stem = f"{ep_meta.robot_type}_{ep_meta.variant}"
                 episode_name = f"episode{ep_meta.episode_idx}"
@@ -88,12 +88,12 @@ def compute_idle_masks(
                 hdf5_bytes = current_zf.read(hdf5_path)
                 hdf5_file = h5py.File(io.BytesIO(hdf5_bytes), "r")
 
-                left_arm = np.array(hdf5_file["joint_action"]["left_arm"])
-                right_arm = np.array(hdf5_file["joint_action"]["right_arm"])
+                # Use 'vector' which contains both arms AND grippers
+                # Format: [left_arm..., left_gripper, right_arm..., right_gripper]
+                full_state = np.array(hdf5_file["joint_action"]["vector"])
                 hdf5_file.close()
 
-                full_joints = np.concatenate([left_arm, right_arm], axis=1)
-                num_timesteps = len(full_joints)
+                num_timesteps = len(full_state)
 
             except Exception as e:
                 print(f"Warning: Failed to load {ep_meta.task_name}/episode{ep_meta.episode_idx}: {e}")
@@ -108,8 +108,8 @@ def compute_idle_masks(
             for t in range(num_timesteps - 1):  # Last timestep has no future
                 # Get available future timesteps
                 available = min(action_horizon, num_timesteps - t - 1)
-                future_states = full_joints[t + 1:t + 1 + available]
-                current_state = full_joints[t]
+                future_states = full_state[t + 1:t + 1 + available]
+                current_state = full_state[t]
 
                 # Compute delta actions
                 delta_actions = future_states - current_state
