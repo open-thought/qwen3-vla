@@ -21,6 +21,7 @@ class TrainingConfig:
     dataset_root: str = "/mnt/robotwin/dataset"
     norm_stats_path: str = "data/robotwin_norm_stats.json"
     episode_lengths_path: str = "data/robotwin_episode_lengths.json"
+    valid_timesteps_path: Optional[str] = None
     action_horizon: int = 50
     pad_action_horizon: bool = False  # Pad action sequences by repeating final state (True) or use variable-length (False)
     image_size: tuple[int, int] = (320, 240)  # (width, height) - native RoboTwin resolution

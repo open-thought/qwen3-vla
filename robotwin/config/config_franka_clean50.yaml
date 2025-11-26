@@ -8,8 +8,9 @@ new_vocab_size: 153984
 
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
-norm_stats_path: data/robotwin_norm_stats_franka_clean50.json
-episode_lengths_path: data/robotwin_episode_lengths_franka_clean50.json
+norm_stats_path: data/robotwin_norm_stats_h16.json
+episode_lengths_path: data/robotwin_episode_lengths.json
+valid_timesteps_path: data/robotwin_valid_timesteps.json
 action_horizon: 16
 pad_action_horizon: true  # Whether to pad action sequences by repeating final state (true) or use variable-length sequences (false)
 image_size:
@@ -85,8 +86,9 @@ validation_split: 0.1
 # Training hyperparameters
 batch_size: 8
 gradient_accumulation_steps: 4
-learning_rate: 2.0e-05
-weight_decay: 0.01
+learning_rate: 1.0e-05
+vision_lr: 2.0e-6
+weight_decay: 0.1
 max_grad_norm: 1.0
 max_steps: 500000
 warmup_steps: 1000
