@@ -19,7 +19,7 @@ from PIL import Image
 from typing import Optional
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from action_tokenizer import ActionTokenizer
+from action_tokenizer import create_action_tokenizer
 from normalization import MultiRobotNormalizer, discretize_normalized_values
 
 
@@ -31,13 +31,12 @@ class Qwen3VLAPolicy:
     - Model loading from checkpoint
     - Observation encoding (images + state → prompt)
     - Action generation via autoregressive decoding
-    - Action decoding (FAST tokens → denormalized delta actions)
+    - Action decoding (tokens → denormalized delta actions)
     - Delta-to-absolute action conversion
     """
 
-    # Token range for FAST tokens
-    FAST_TOKEN_START = 151936
-    FAST_TOKEN_END = 153983
+    # Base offset for action tokens in extended vocabulary
+    ACTION_TOKEN_OFFSET = 151936
     # EOT token to mark end of action sequence (Qwen3 <|im_end|>)
     EOT_TOKEN_ID = 151645
 
@@ -48,11 +47,12 @@ class Qwen3VLAPolicy:
         action_horizon: int = 16,
         robot_type: str = "aloha-agilex",
         device: str = "cuda:0",
-        max_new_tokens: int = 150,  # Typical FAST sequences are 91-99 tokens
+        max_new_tokens: int = 250,  # BinTokenizer needs 224 tokens for 16x14 actions
         debug_timing: bool = True,  # Print generation timing info
         debug_actions: bool = False,  # Print decoded action values
         temperature: float = 0.6,  # Sampling temperature (0 for greedy)
         top_p: float = 0.95,  # Nucleus sampling top-p
+        tokenizer_type: str = "fast",  # "fast" or "bin"
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -68,6 +68,7 @@ class Qwen3VLAPolicy:
             debug_actions: Print decoded action values
             temperature: Sampling temperature (0 for greedy decoding)
             top_p: Nucleus sampling top-p value
+            tokenizer_type: Type of action tokenizer ("fast" or "bin")
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -78,6 +79,7 @@ class Qwen3VLAPolicy:
         self.debug_actions = debug_actions
         self.temperature = temperature
         self.top_p = top_p
+        self.tokenizer_type = tokenizer_type
 
         # Timing statistics
         self.total_generate_time = 0.0
@@ -103,9 +105,10 @@ class Qwen3VLAPolicy:
             trust_remote_code=True,
         )
 
-        # Load action tokenizer (FAST)
-        print("Loading FAST action tokenizer...")
-        self.action_tokenizer = ActionTokenizer()
+        # Load action tokenizer
+        print(f"Loading {tokenizer_type.upper()} action tokenizer...")
+        self.action_tokenizer = create_action_tokenizer(tokenizer_type)
+        self.action_token_start, self.action_token_end = self.action_tokenizer.get_token_range()
 
         # Load normalizer
         print(f"Loading normalization stats from {norm_stats_path}...")
@@ -338,49 +341,48 @@ State: [{state_str}]"""
 
         if self.debug_timing:
             tokens_per_sec = num_tokens / generate_time if generate_time > 0 else 0
-            avg_tokens_per_sec = self.total_tokens_generated / self.total_generate_time if self.total_generate_time > 0 else 0
-            # Count FAST tokens vs other tokens
-            num_fast = sum(1 for t in generated_tokens if self.FAST_TOKEN_START <= t <= self.FAST_TOKEN_END)
+            # Count action tokens vs other tokens
+            num_action = sum(1 for t in generated_tokens if self.action_token_start <= t <= self.action_token_end)
             num_eot = sum(1 for t in generated_tokens if t == self.EOT_TOKEN_ID)
-            print(f"    Generate: {input_len} prompt + {num_tokens} output ({num_fast} FAST, {num_eot} EOT) "
+            print(f"    Generate: {input_len} prompt + {num_tokens} output ({num_action} {self.tokenizer_type.upper()}, {num_eot} EOT) "
                   f"in {generate_time*1000:.0f}ms ({tokens_per_sec:.1f} tok/s)")
 
-        # Filter to FAST token range, stopping at EOT token
-        fast_tokens = []
+        # Filter to action token range, stopping at EOT token
+        action_tokens = []
         for t in generated_tokens:
             if t == self.EOT_TOKEN_ID:
                 break  # Stop at EOT token
-            if self.FAST_TOKEN_START <= t <= self.FAST_TOKEN_END:
-                fast_tokens.append(t)
+            if self.action_token_start <= t <= self.action_token_end:
+                action_tokens.append(t)
 
         if self.debug_actions:
             # Print state info to verify it's changing between calls
             print(f"    State (first 6): [{', '.join(f'{x:.4f}' for x in state[:6])}]")
             print(f"    Discretized (first 6): [{', '.join(str(int(x)) for x in discretized_state[:6])}]")
-            tokens_no_offset = [t - self.FAST_TOKEN_START for t in fast_tokens]
-            print(f"    FAST tokens ({len(fast_tokens)}): {tokens_no_offset}")
+            tokens_no_offset = [t - self.action_token_start for t in action_tokens]
+            print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}): {tokens_no_offset}")
             if self.num_generate_calls <= 2:
                 # Print full prompt on first few calls
                 print(f"    Prompt: {prompt_text}")
 
-        if len(fast_tokens) == 0:
-            print("Warning: No FAST tokens generated, returning zero actions")
-            return np.zeros((self.action_horizon, 14))
+        if len(action_tokens) == 0:
+            print(f"Warning: No {self.tokenizer_type.upper()} tokens generated, returning current position (no movement)")
+            return self._get_no_movement_actions()
 
-        # Decode FAST tokens to normalized delta actions
+        # Decode action tokens to normalized delta actions
         try:
             normalized_deltas = self.action_tokenizer.decode(
-                [fast_tokens],
+                [action_tokens],
                 action_horizon=self.action_horizon,
                 action_dim=self.action_dim,
             )[0]  # Remove batch dim
         except Exception as e:
             # Remove offset for debugging
-            tokens_no_offset = [t - self.FAST_TOKEN_START for t in fast_tokens]
+            tokens_no_offset = [t - self.action_token_start for t in action_tokens]
             print(f"Error decoding tokens: {e}")
             print(f"Tokens: {tokens_no_offset[:100]}{'...' if len(tokens_no_offset) > 100 else ''}")
-            # Return zero deltas on error
-            return np.zeros((self.action_horizon, 14))
+            # Return current position on error (no movement)
+            return self._get_no_movement_actions()
 
         # Split normalized_deltas into joint deltas and gripper values
         # normalized_deltas shape: (action_horizon, 2*dof + 2) = (action_horizon, 14)
@@ -453,6 +455,20 @@ State: [{state_str}]"""
 
         return actions
 
+    def _get_no_movement_actions(self) -> np.ndarray:
+        """
+        Return actions that maintain the current position (no movement).
+
+        Used as a safe fallback when token decoding fails.
+
+        Returns:
+            Actions array (action_horizon, 14) with current qpos repeated
+        """
+        # Repeat current qpos for entire action horizon
+        # current_qpos format: [left_arm(6), left_gripper(1), right_arm(6), right_gripper(1)]
+        actions = np.tile(self.current_qpos, (self.action_horizon, 1))
+        return actions
+
 
 # ============================================================================
 # RoboTwin Policy Interface Functions
@@ -474,6 +490,7 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
             - device: CUDA device (default: "cuda:0")
             - temperature: Sampling temperature (default: 0.6, 0 for greedy)
             - top_p: Nucleus sampling top-p (default: 0.95)
+            - tokenizer_type: Action tokenizer type ("fast" or "bin", default: "fast")
 
     Returns:
         Qwen3VLAPolicy instance
@@ -494,6 +511,7 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     debug_actions = usr_args.get("debug_actions", False)
     temperature = usr_args.get("temperature", 0.6)
     top_p = usr_args.get("top_p", 0.95)
+    tokenizer_type = usr_args.get("tokenizer_type", "fast")
 
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
@@ -504,6 +522,7 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         debug_actions=debug_actions,
         temperature=temperature,
         top_p=top_p,
+        tokenizer_type=tokenizer_type,
     )
 
     return _policy_instance

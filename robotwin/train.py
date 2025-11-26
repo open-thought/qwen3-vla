@@ -59,6 +59,7 @@ def create_dataloaders(config: TrainingConfig):
         max_num_transforms=config.max_num_transforms,
         random_order=config.random_order,
         pad_action_horizon=config.pad_action_horizon,
+        tokenizer_type=config.tokenizer_type,
     )
 
     # Split into train/val
@@ -91,6 +92,7 @@ def create_dataloaders(config: TrainingConfig):
         max_num_transforms=config.max_num_transforms,
         random_order=config.random_order,
         pad_action_horizon=config.pad_action_horizon,
+        tokenizer_type=config.tokenizer_type,
     )
 
     # Use same indices for validation
@@ -99,7 +101,7 @@ def create_dataloaders(config: TrainingConfig):
     # Create processor and collator
     from transformers import AutoProcessor
     processor = AutoProcessor.from_pretrained(config.model_name, trust_remote_code=True)
-    collator = VLADataCollator(processor=processor)
+    collator = VLADataCollator(processor=processor, tokenizer_type=config.tokenizer_type)
 
     # Create dataloaders
     train_loader = DataLoader(
@@ -231,6 +233,7 @@ def train(config: TrainingConfig):
     else:
         model = Qwen3VLAModel(
             model_name=config.model_name,
+            new_vocab_size=config.new_vocab_size,
             use_lora=config.use_lora,
             lora_r=config.lora_r,
             lora_alpha=config.lora_alpha,

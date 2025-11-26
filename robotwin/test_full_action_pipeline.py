@@ -1,27 +1,31 @@
 """
 Full pipeline test for action tokenization with grippers.
 
-Tests the complete roundtrip:
+Tests the complete roundtrip for both FAST and BinTokenizer:
 1. Dataset extracts delta joints + absolute grippers
 2. Normalizes and concatenates to 14-dim actions
-3. FAST tokenizes the normalized actions
-4. FAST detokenizes back to normalized actions
+3. Tokenizes the normalized actions (FAST or Bin)
+4. Detokenizes back to normalized actions
 5. Splits and denormalizes joints and grippers separately
-6. Verifies reconstruction matches original (within FAST compression tolerance)
+6. Verifies reconstruction matches original (within tokenizer compression tolerance)
 """
 
 import numpy as np
 import torch
 
 from robotwin_dataset import RoboTwinVLADataset
-from action_tokenizer import ActionTokenizer
+from action_tokenizer import create_action_tokenizer, FASTTokenizer, BinTokenizer
 from normalization import MultiRobotNormalizer
 
 
-def test_full_action_pipeline():
-    """Test the complete action tokenization pipeline including grippers."""
+def test_full_action_pipeline(tokenizer_type: str = "fast"):
+    """Test the complete action tokenization pipeline including grippers.
+
+    Args:
+        tokenizer_type: "fast" or "bin"
+    """
     print("=" * 80)
-    print("FULL ACTION PIPELINE TEST (with grippers)")
+    print(f"FULL ACTION PIPELINE TEST (with grippers) - {tokenizer_type.upper()} Tokenizer")
     print("=" * 80)
 
     # Load dataset
@@ -37,6 +41,7 @@ def test_full_action_pipeline():
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
+        tokenizer_type=tokenizer_type,
     )
     print(f"   Dataset size: {len(dataset)}")
 
@@ -78,12 +83,12 @@ def test_full_action_pipeline():
     action_tokens = sample["action_tokens"]
     print(f"\n5. Action tokens from dataset...")
     print(f"   Number of tokens: {len(action_tokens)}")
-    print(f"   Token range: [{min(action_tokens)}, {max(action_tokens)}]")
+    print(f"   Tokens: {action_tokens}")
 
     # Now simulate the evaluation pipeline (as in qwen3_vla_policy.py)
     print("\n6. Simulating evaluation pipeline (decode tokens)...")
 
-    tokenizer = ActionTokenizer()
+    tokenizer = create_action_tokenizer(tokenizer_type)
     normalizer = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json")
 
     # Decode tokens back to normalized actions
@@ -164,14 +169,22 @@ def test_full_action_pipeline():
     # Assertions
     print("\n12. Running assertions...")
 
-    # FAST compression has some loss, but should be reasonable
+    # Set error thresholds based on tokenizer type
+    # FAST has compression loss, Bin is more precise (256 bins = ~0.008 bin width)
+    if tokenizer_type == "bin":
+        joint_threshold = 0.02  # BinTokenizer is more precise
+        gripper_threshold = 0.02
+    else:
+        joint_threshold = 0.1  # FAST compression has more loss
+        gripper_threshold = 0.1
+
     # Joint errors should be small relative to typical delta magnitudes
-    assert joint_mae < 0.1, f"Joint MAE too large: {joint_mae}"
-    print(f"    ✓ Joint MAE < 0.1")
+    assert joint_mae < joint_threshold, f"Joint MAE too large: {joint_mae} (threshold: {joint_threshold})"
+    print(f"    ✓ Joint MAE < {joint_threshold}")
 
     # Gripper errors should be very small since they're in [0, 1]
-    assert gripper_mae < 0.1, f"Gripper MAE too large: {gripper_mae}"
-    print(f"    ✓ Gripper MAE < 0.1")
+    assert gripper_mae < gripper_threshold, f"Gripper MAE too large: {gripper_mae} (threshold: {gripper_threshold})"
+    print(f"    ✓ Gripper MAE < {gripper_threshold}")
 
     # Verify shapes are correct
     assert decoded_delta_joints.shape == delta_joints.shape, "Joint shape mismatch"
@@ -183,10 +196,11 @@ def test_full_action_pipeline():
     dataset.close()
 
     print("\n" + "=" * 80)
-    print("✅ FULL ACTION PIPELINE TEST PASSED")
+    print(f"✅ FULL ACTION PIPELINE TEST PASSED ({tokenizer_type.upper()})")
     print("=" * 80)
 
     return {
+        "tokenizer_type": tokenizer_type,
         "joint_mae": joint_mae,
         "joint_max_error": joint_max_error,
         "gripper_mae": gripper_mae,
@@ -194,10 +208,14 @@ def test_full_action_pipeline():
     }
 
 
-def test_multiple_samples():
-    """Test pipeline on multiple samples to get statistics."""
+def test_multiple_samples(tokenizer_type: str = "fast"):
+    """Test pipeline on multiple samples to get statistics.
+
+    Args:
+        tokenizer_type: "fast" or "bin"
+    """
     print("\n" + "=" * 80)
-    print("TESTING MULTIPLE SAMPLES")
+    print(f"TESTING MULTIPLE SAMPLES - {tokenizer_type.upper()} Tokenizer")
     print("=" * 80)
 
     dataset = RoboTwinVLADataset(
@@ -211,9 +229,10 @@ def test_multiple_samples():
         variants=["clean_50"],
         cache_size=5,
         enable_augmentation=False,
+        tokenizer_type=tokenizer_type,
     )
 
-    tokenizer = ActionTokenizer()
+    tokenizer = create_action_tokenizer(tokenizer_type)
     normalizer = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json")
 
     joint_maes = []
@@ -231,6 +250,7 @@ def test_multiple_samples():
         delta_joints = sample["delta_joints"]
         future_grippers = sample["future_grippers"]
         action_tokens = sample["action_tokens"]
+        print(f"{i}: {[x-tokenizer.VOCAB_OFFSET for x in action_tokens]} ({len(action_tokens)} tokens)") 
 
         # Decode
         decoded_normalized = tokenizer.decode(
@@ -259,15 +279,79 @@ def test_multiple_samples():
 
     dataset.close()
 
-    print(f"\nResults over {num_samples} samples:")
+    print(f"\nResults over {num_samples} samples ({tokenizer_type.upper()}):")
     print(f"  Joint delta MAE:  mean={np.mean(joint_maes):.6f}, std={np.std(joint_maes):.6f}, max={np.max(joint_maes):.6f}")
     print(f"  Gripper MAE:      mean={np.mean(gripper_maes):.6f}, std={np.std(gripper_maes):.6f}, max={np.max(gripper_maes):.6f}")
 
     print("\n" + "=" * 80)
-    print("✅ MULTIPLE SAMPLES TEST PASSED")
+    print(f"✅ MULTIPLE SAMPLES TEST PASSED ({tokenizer_type.upper()})")
+    print("=" * 80)
+
+    return {
+        "tokenizer_type": tokenizer_type,
+        "joint_mae_mean": np.mean(joint_maes),
+        "joint_mae_std": np.std(joint_maes),
+        "gripper_mae_mean": np.mean(gripper_maes),
+        "gripper_mae_std": np.std(gripper_maes),
+    }
+
+
+def test_both_tokenizers():
+    """Test both FAST and Bin tokenizers and compare results."""
+    print("\n" + "=" * 80)
+    print("COMPARING FAST VS BIN TOKENIZERS")
+    print("=" * 80)
+
+    results = {}
+
+    # Test FAST tokenizer
+    print("\n>>> Testing FAST tokenizer <<<")
+    results["fast"] = test_full_action_pipeline("fast")
+
+    # Test BIN tokenizer
+    print("\n>>> Testing BIN tokenizer <<<")
+    results["bin"] = test_full_action_pipeline("bin")
+
+    # Test multiple samples with both
+    print("\n>>> Testing multiple samples with FAST <<<")
+    fast_stats = test_multiple_samples("fast")
+
+    print("\n>>> Testing multiple samples with BIN <<<")
+    bin_stats = test_multiple_samples("bin")
+
+    # Print comparison summary
+    print("\n" + "=" * 80)
+    print("TOKENIZER COMPARISON SUMMARY")
+    print("=" * 80)
+    print(f"\nSingle sample results:")
+    print(f"  FAST: Joint MAE={results['fast']['joint_mae']:.6f}, Gripper MAE={results['fast']['gripper_mae']:.6f}")
+    print(f"  BIN:  Joint MAE={results['bin']['joint_mae']:.6f}, Gripper MAE={results['bin']['gripper_mae']:.6f}")
+
+    print(f"\nMultiple samples results (mean ± std):")
+    print(f"  FAST: Joint MAE={fast_stats['joint_mae_mean']:.6f}±{fast_stats['joint_mae_std']:.6f}, "
+          f"Gripper MAE={fast_stats['gripper_mae_mean']:.6f}±{fast_stats['gripper_mae_std']:.6f}")
+    print(f"  BIN:  Joint MAE={bin_stats['joint_mae_mean']:.6f}±{bin_stats['joint_mae_std']:.6f}, "
+          f"Gripper MAE={bin_stats['gripper_mae_mean']:.6f}±{bin_stats['gripper_mae_std']:.6f}")
+
+    print("\n" + "=" * 80)
+    print("✅ ALL TOKENIZER TESTS PASSED")
     print("=" * 80)
 
 
 if __name__ == "__main__":
-    test_full_action_pipeline()
-    test_multiple_samples()
+    import argparse
+    parser = argparse.ArgumentParser(description="Test action tokenization pipeline")
+    parser.add_argument(
+        "--tokenizer", "-t",
+        type=str,
+        default="both",
+        choices=["fast", "bin", "both"],
+        help="Which tokenizer to test (default: both)"
+    )
+    args = parser.parse_args()
+
+    if args.tokenizer == "both":
+        test_both_tokenizers()
+    else:
+        test_full_action_pipeline(args.tokenizer)
+        test_multiple_samples(args.tokenizer)

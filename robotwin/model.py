@@ -1,8 +1,8 @@
 """
-Qwen3-VL model extended with FAST action tokens for VLA training.
+Qwen3-VL model extended with action tokens for VLA training.
 
-Extends the Qwen3-VL vocabulary with 2048 FAST tokens and provides
-training utilities for vision-language-action learning.
+Extends the Qwen3-VL vocabulary with action tokens (FAST or Bin tokenizer)
+and provides training utilities for vision-language-action learning.
 """
 
 import torch
@@ -20,20 +20,19 @@ class Qwen3VLAModel(nn.Module):
     Qwen3-VL model extended for Vision-Language-Action tasks.
 
     Key features:
-    - Extended vocabulary: 151936 → 153984 tokens (+2048 FAST tokens)
+    - Extended vocabulary with action tokens (FAST: +2048, Bin: +256)
     - New embeddings initialized with mean of existing embeddings
     - Supports LoRA fine-tuning
     - Custom loss computation (only on action tokens)
     """
 
-    # Vocabulary configuration
+    # Default vocabulary configuration (can be overridden via new_vocab_size parameter)
     ORIGINAL_VOCAB_SIZE = 151936
-    FAST_VOCAB_SIZE = 2048
-    NEW_VOCAB_SIZE = ORIGINAL_VOCAB_SIZE + FAST_VOCAB_SIZE  # 153984
 
     def __init__(
         self,
         model_name: str = "Qwen/Qwen3-VL-2B-Instruct",
+        new_vocab_size: int = 153984,  # 151936 + 2048 (FAST) or 151936 + 256 (Bin)
         use_lora: bool = False,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -45,6 +44,7 @@ class Qwen3VLAModel(nn.Module):
 
         Args:
             model_name: HuggingFace model name
+            new_vocab_size: Extended vocabulary size (original + action tokens)
             use_lora: Whether to use LoRA for efficient fine-tuning
             lora_r: LoRA rank
             lora_alpha: LoRA scaling factor
@@ -52,6 +52,9 @@ class Qwen3VLAModel(nn.Module):
             lora_dropout: LoRA dropout rate
         """
         super().__init__()
+
+        self.NEW_VOCAB_SIZE = new_vocab_size
+        self.ACTION_VOCAB_SIZE = new_vocab_size - self.ORIGINAL_VOCAB_SIZE
 
         print(f"Loading {model_name}...")
         self.model = AutoModelForImageTextToText.from_pretrained(
@@ -68,7 +71,7 @@ class Qwen3VLAModel(nn.Module):
         )
 
         print(f"Original vocabulary size: {self.ORIGINAL_VOCAB_SIZE}")
-        print(f"Extending vocabulary with {self.FAST_VOCAB_SIZE} FAST tokens...")
+        print(f"Extending vocabulary with {self.ACTION_VOCAB_SIZE} action tokens...")
 
         # Extend vocabulary
         self._extend_vocabulary()
@@ -86,7 +89,7 @@ class Qwen3VLAModel(nn.Module):
             )
 
     def _extend_vocabulary(self):
-        """Extend vocabulary with FAST tokens."""
+        """Extend vocabulary with action tokens."""
         # Resize token embeddings
         # pad_to_multiple_of helps with hardware efficiency
         # mean_resizing initializes new tokens with mean of existing embeddings

@@ -15,7 +15,8 @@ class TrainingConfig:
     # Model configuration
     model_name: str = "Qwen/Qwen3-VL-2B-Instruct"
     original_vocab_size: int = 151936
-    new_vocab_size: int = 153984  # 151936 + 2048 FAST tokens
+    new_vocab_size: int = 153984  # 151936 + 2048 FAST tokens (or 151936 + 256 for bin tokenizer)
+    tokenizer_type: str = "fast"  # "fast" (compressed FAST tokenizer) or "bin" (OpenVLA-style 256 bins)
 
     # Dataset configuration
     dataset_root: str = "/mnt/robotwin/dataset"
@@ -87,6 +88,17 @@ class TrainingConfig:
         """Validate and setup configuration."""
         # Create checkpoint directory
         Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
+        # Validate tokenizer type and adjust vocab size
+        if self.tokenizer_type not in ("fast", "bin"):
+            raise ValueError(f"tokenizer_type must be 'fast' or 'bin', got {self.tokenizer_type}")
+
+        # Auto-adjust vocab size if using default value (153984 = FAST default)
+        if self.new_vocab_size == 153984:
+            if self.tokenizer_type == "bin":
+                self.new_vocab_size = self.original_vocab_size + 256
+                print(f"Using BinTokenizer: adjusted new_vocab_size to {self.new_vocab_size}")
+            # else: keep default 153984 for FAST
 
         # Validate action horizon
         if self.action_horizon <= 0:

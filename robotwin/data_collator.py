@@ -20,21 +20,33 @@ class VLADataCollator:
     - Proper masking to compute loss only on action tokens
     """
 
+    # Base offset for action tokens in extended vocabulary
+    ACTION_TOKEN_OFFSET = 151936
+
     def __init__(
         self,
         processor,
-        action_token_start: int = 151936,  # First FAST token ID
-        action_token_end: int = 153983,    # Last FAST token ID
+        action_token_start: int = 151936,  # First action token ID
+        action_token_end: int = 153983,    # Last action token ID (FAST default: 151936 + 2048 - 1)
         add_eot_token: bool = True,        # Add EOT token after action sequence
+        tokenizer_type: str = "fast",      # "fast" or "bin"
     ):
         """
         Args:
             processor: Qwen3VL processor for tokenizing and preparing inputs
-            action_token_start: First token ID in FAST vocabulary
-            action_token_end: Last token ID in FAST vocabulary
+            action_token_start: First token ID in action vocabulary
+            action_token_end: Last token ID in action vocabulary
             add_eot_token: Whether to append EOT token after action sequence
+            tokenizer_type: Type of action tokenizer ("fast" or "bin")
         """
         self.processor = processor
+        self.tokenizer_type = tokenizer_type
+
+        # Set token range based on tokenizer type if using defaults
+        if tokenizer_type == "bin" and action_token_end == 153983:
+            # BinTokenizer uses 256 bins by default
+            action_token_end = self.ACTION_TOKEN_OFFSET + 256 - 1
+
         self.action_token_start = action_token_start
         self.action_token_end = action_token_end
         self.add_eot_token = add_eot_token

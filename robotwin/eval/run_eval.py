@@ -516,6 +516,13 @@ def main():
         default="eval_results",
         help="Output directory for results"
     )
+    parser.add_argument(
+        "--tokenizer_type",
+        type=str,
+        default="fast",
+        choices=["fast", "bin"],
+        help="Action tokenizer type: 'fast' (compressed) or 'bin' (OpenVLA-style 256 bins)"
+    )
 
     args = parser.parse_args()
 
@@ -542,6 +549,7 @@ def main():
         "debug_actions": args.debug_actions,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "tokenizer_type": args.tokenizer_type,
     }
     model = get_model(model_args)
 
