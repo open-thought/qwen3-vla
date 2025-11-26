@@ -331,14 +331,16 @@ def train(config: TrainingConfig):
     model.model.train()
     global_step = start_step
     running_loss = 0
+    micro_step = 0  # Counts microbatches within a gradient accumulation cycle
     best_val_loss = float('inf')
 
     # Infinite data iterator
     train_iterator = iter(train_loader)
 
-    pbar = tqdm(range(start_step, config.max_steps), initial=start_step, total=config.max_steps)
+    # Progress bar tracks global (optimizer) steps, not microbatches
+    pbar = tqdm(initial=start_step, total=config.max_steps, desc="Training")
 
-    for step in pbar:
+    while global_step < config.max_steps:
         # Get next batch
         try:
             batch = next(train_iterator)
@@ -346,12 +348,13 @@ def train(config: TrainingConfig):
             train_iterator = iter(train_loader)
             batch = next(train_iterator)
 
-        # Training step
+        # Training step (forward + backward, no optimizer step yet)
         loss = train_step(model.model, batch, config.use_amp)
         running_loss += loss
+        micro_step += 1
 
-        # Gradient accumulation
-        if (step + 1) % config.gradient_accumulation_steps == 0:
+        # Gradient accumulation complete - do optimizer step
+        if micro_step % config.gradient_accumulation_steps == 0:
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(model.model.parameters(), config.max_grad_norm)
 
@@ -361,53 +364,61 @@ def train(config: TrainingConfig):
             optimizer.zero_grad()
 
             global_step += 1
+            pbar.update(1)
 
-        # Logging
-        if (step + 1) % config.wandb_log_interval == 0:
-            avg_loss = running_loss / config.wandb_log_interval
-            lrs = scheduler.get_last_lr()
+            # Logging (every log_interval global steps)
+            if global_step % config.wandb_log_interval == 0:
+                # Average loss over the microbatches since last log
+                num_microbatches = config.wandb_log_interval * config.gradient_accumulation_steps
+                avg_loss = running_loss / num_microbatches
+                lrs = scheduler.get_last_lr()
 
-            # Display primary learning rate in progress bar
-            pbar.set_postfix({
-                "loss": f"{avg_loss:.4f}",
-                "lr": f"{lrs[0]:.2e}",
-            })
-
-            if config.enable_wandb and WANDB_AVAILABLE:
-                log_dict = {
-                    "train/loss": avg_loss,
-                    "train/step": global_step,
+                # Display learning rates in progress bar
+                postfix = {
+                    "loss": f"{avg_loss:.4f}",
+                    "lr": f"{lrs[0]:.2e}",
                 }
-
-                # Log all learning rates if using parameter groups
                 if len(lrs) > 1:
-                    log_dict["train/learning_rate_other"] = lrs[0]
-                    log_dict["train/learning_rate_vision"] = lrs[1]
-                else:
-                    log_dict["train/learning_rate"] = lrs[0]
+                    postfix["vlr"] = f"{lrs[1]:.2e}"  # vision tower lr
+                pbar.set_postfix(postfix)
 
-                wandb.log(log_dict, step=global_step)
+                if config.enable_wandb and WANDB_AVAILABLE:
+                    log_dict = {
+                        "train/loss": avg_loss,
+                        "train/step": global_step,
+                    }
 
-            running_loss = 0
+                    # Log all learning rates if using parameter groups
+                    if len(lrs) > 1:
+                        log_dict["train/learning_rate_other"] = lrs[0]
+                        log_dict["train/learning_rate_vision"] = lrs[1]
+                    else:
+                        log_dict["train/learning_rate"] = lrs[0]
 
-        # Validation
-        if (step + 1) % config.val_interval == 0:
-            val_loss = validate(model.model, val_loader, config, global_step)
-            print(f"\nStep {global_step}: Validation loss = {val_loss:.4f}")
+                    wandb.log(log_dict, step=global_step)
 
-            if config.enable_wandb and WANDB_AVAILABLE:
-                wandb.log({
-                    "val/loss": val_loss,
-                }, step=global_step)
+                running_loss = 0
 
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_checkpoint(model, optimizer, scheduler, global_step, config, is_best=True)
+            # Validation
+            if global_step % config.val_interval == 0:
+                val_loss = validate(model.model, val_loader, config, global_step)
+                print(f"\nStep {global_step}: Validation loss = {val_loss:.4f}")
 
-        # Save checkpoint
-        if (step + 1) % config.save_interval == 0:
-            save_checkpoint(model, optimizer, scheduler, global_step, config)
+                if config.enable_wandb and WANDB_AVAILABLE:
+                    wandb.log({
+                        "val/loss": val_loss,
+                    }, step=global_step)
+
+                # Save best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    save_checkpoint(model, optimizer, scheduler, global_step, config, is_best=True)
+
+            # Save checkpoint
+            if global_step % config.save_interval == 0:
+                save_checkpoint(model, optimizer, scheduler, global_step, config)
+
+    pbar.close()
 
     # Final save
     print("\nTraining complete!")

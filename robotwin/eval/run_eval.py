@@ -499,6 +499,18 @@ def main():
         help="Print decoded action values for debugging"
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.6,
+        help="Sampling temperature (0 for greedy decoding)"
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=0.95,
+        help="Nucleus sampling top-p value"
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="eval_results",
@@ -528,6 +540,8 @@ def main():
         "robot_type": args.robot_type,
         "device": args.device,
         "debug_actions": args.debug_actions,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
     }
     model = get_model(model_args)
 

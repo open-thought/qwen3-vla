@@ -313,46 +313,60 @@ class RoboTwinVLADataset(Dataset):
         right_arm = episode_data["right_arm"]
         full_joints = np.concatenate([left_arm, right_arm], axis=1)  # (T, 2*dof)
 
+        # Get gripper states for all timesteps
+        left_gripper = episode_data["left_gripper"]  # (T,)
+        right_gripper = episode_data["right_gripper"]  # (T,)
+        full_grippers = np.stack([left_gripper, right_gripper], axis=1)  # (T, 2)
+
         num_timesteps = len(full_joints)
         current_state = full_joints[timestep].astype(np.float32)  # (2*dof,)
+        current_grippers = full_grippers[timestep].astype(np.float32)  # (2,)
 
-        # Get gripper states
-        left_gripper = episode_data["left_gripper"][timestep]
-        right_gripper = episode_data["right_gripper"][timestep]
-        current_grippers = np.array([left_gripper, right_gripper], dtype=np.float32)
-
-        # Get future states for delta actions
+        # Get future states for delta actions (joints + grippers)
         if self.pad_action_horizon:
             # Pad to fixed action_horizon by repeating final state if needed
             future_end = min(timestep + 1 + self.action_horizon, num_timesteps)
-            future_states = full_joints[timestep+1:future_end]  # (num_available, 2*dof)
+            future_joints = full_joints[timestep+1:future_end]  # (num_available, 2*dof)
+            future_grippers = full_grippers[timestep+1:future_end]  # (num_available, 2)
 
             # Pad with final state if needed
-            num_available = len(future_states)
+            num_available = len(future_joints)
             if num_available < self.action_horizon:
                 # Repeat the final state to fill the action horizon
-                final_state = full_joints[-1:].repeat(self.action_horizon - num_available, axis=0)
-                future_states = np.concatenate([future_states, final_state], axis=0)
+                pad_count = self.action_horizon - num_available
+                final_joints = full_joints[-1:].repeat(pad_count, axis=0)
+                final_grippers = full_grippers[-1:].repeat(pad_count, axis=0)
+                future_joints = np.concatenate([future_joints, final_joints], axis=0)
+                future_grippers = np.concatenate([future_grippers, final_grippers], axis=0)
 
-            # Now future_states has shape (action_horizon, 2*dof)
-            assert len(future_states) == self.action_horizon, \
-                f"Expected {self.action_horizon} future states, got {len(future_states)}"
+            # Now future_joints has shape (action_horizon, 2*dof)
+            assert len(future_joints) == self.action_horizon, \
+                f"Expected {self.action_horizon} future states, got {len(future_joints)}"
 
             actual_horizon = self.action_horizon
         else:
             # Use variable-length sequences based on remaining timesteps
             num_available = min(self.action_horizon, num_timesteps - timestep - 1)
-            future_states = full_joints[timestep+1:timestep+1+num_available]  # (num_available, 2*dof)
+            future_joints = full_joints[timestep+1:timestep+1+num_available]  # (num_available, 2*dof)
+            future_grippers = full_grippers[timestep+1:timestep+1+num_available]  # (num_available, 2)
             actual_horizon = num_available
 
-        # Compute delta actions
-        delta_actions = future_states - current_state[None, :]  # (actual_horizon, 2*dof)
-        delta_actions = delta_actions.astype(np.float32)
+        # Compute delta actions for joints
+        delta_joints = future_joints - current_state[None, :]  # (actual_horizon, 2*dof)
+        delta_joints = delta_joints.astype(np.float32)
 
-        # Normalize state, grippers, and delta actions
+        # Normalize state and delta joint actions
         normalized_state = self.normalizer.normalize_state(current_state, robot_type)
         normalized_grippers = self.normalizer.normalize_grippers(current_grippers, robot_type)
-        normalized_deltas = self.normalizer.normalize_delta_actions(delta_actions, robot_type)
+        normalized_delta_joints = self.normalizer.normalize_delta_actions(delta_joints, robot_type)
+
+        # For grippers, use absolute future values (normalized to [-1, 1])
+        # Grippers are typically binary (open/close), so absolute values work better than deltas
+        normalized_future_grippers = self.normalizer.normalize_grippers(future_grippers.astype(np.float32), robot_type)
+
+        # Concatenate normalized delta joints with normalized future grippers
+        # Shape: (actual_horizon, 2*dof + 2) = (actual_horizon, 14) for 6-DoF dual-arm
+        normalized_deltas = np.concatenate([normalized_delta_joints, normalized_future_grippers], axis=1)
 
         # Concatenate normalized state and grippers: (2*dof + 2,)
         normalized_state_with_grippers = np.concatenate([normalized_state, normalized_grippers])
@@ -380,16 +394,18 @@ class RoboTwinVLADataset(Dataset):
             "robot_type": robot_type,
 
             # State (discretized for prompt)
-            "discretized_state": discretized_state,  # (2*dof,) in [0, 255]
+            "discretized_state": discretized_state,  # (2*dof + 2,) in [0, 255]
 
             # Action targets
             "action_tokens": action_tokens,  # List of token IDs
 
             # Raw and normalized values (for verification/debugging)
-            "state": current_state,  # Unnormalized state (joint positions)
-            "delta_actions": delta_actions,  # Unnormalized delta actions
+            "state": current_state,  # Unnormalized state (joint positions only)
+            "grippers": current_grippers,  # Unnormalized gripper positions
+            "delta_joints": delta_joints,  # Unnormalized delta actions for joints
+            "future_grippers": future_grippers,  # Unnormalized future gripper positions
             "normalized_state": normalized_state,
-            "normalized_deltas": normalized_deltas,
+            "normalized_deltas": normalized_deltas,  # (action_horizon, 2*dof + 2) - joints deltas + gripper absolutes
 
             # Metadata
             "episode_id": f"{ep_meta.task_name}_ep{ep_meta.episode_idx}",

@@ -68,9 +68,6 @@ class MultiRobotNormalizer:
         # Then * 2 - 1 maps [0, 1] to [-1, 1]
         normalized = 2.0 * (state - q01) / (q99 - q01 + 1e-8) - 1.0
 
-        # Clamp to [-1, 1] to handle outliers
-        normalized = np.clip(normalized, -1.0, 1.0)
-
         if return_torch:
             return torch.from_numpy(normalized).float()
         return normalized
@@ -123,9 +120,6 @@ class MultiRobotNormalizer:
         # Normalize to [-1, 1]
         normalized = 2.0 * (delta_actions - q01) / (q99 - q01 + 1e-8) - 1.0
 
-        # Clamp to [-1, 1]
-        normalized = np.clip(normalized, -1.0, 1.0)
-
         if return_torch:
             return torch.from_numpy(normalized).float()
         return normalized
@@ -177,9 +171,6 @@ class MultiRobotNormalizer:
 
         # Normalize to [-1, 1]
         normalized = 2.0 * (grippers - q01) / (q99 - q01 + 1e-8) - 1.0
-
-        # Clamp to [-1, 1]
-        normalized = np.clip(normalized, -1.0, 1.0)
 
         if return_torch:
             return torch.from_numpy(normalized).float()

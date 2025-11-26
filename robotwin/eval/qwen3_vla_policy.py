@@ -51,6 +51,8 @@ class Qwen3VLAPolicy:
         max_new_tokens: int = 150,  # Typical FAST sequences are 91-99 tokens
         debug_timing: bool = True,  # Print generation timing info
         debug_actions: bool = False,  # Print decoded action values
+        temperature: float = 0.6,  # Sampling temperature (0 for greedy)
+        top_p: float = 0.95,  # Nucleus sampling top-p
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -64,6 +66,8 @@ class Qwen3VLAPolicy:
             max_new_tokens: Maximum tokens to generate
             debug_timing: Print generation timing info
             debug_actions: Print decoded action values
+            temperature: Sampling temperature (0 for greedy decoding)
+            top_p: Nucleus sampling top-p value
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -72,6 +76,8 @@ class Qwen3VLAPolicy:
         self.max_new_tokens = max_new_tokens
         self.debug_timing = debug_timing
         self.debug_actions = debug_actions
+        self.temperature = temperature
+        self.top_p = top_p
 
         # Timing statistics
         self.total_generate_time = 0.0
@@ -108,10 +114,11 @@ class Qwen3VLAPolicy:
         # Get robot metadata
         metadata = self.normalizer.get_robot_metadata(robot_type)
         self.dof = metadata["dof"]
-        self.action_dim = 2 * self.dof  # Both arms
+        # Action dim includes joints (2*dof) + grippers (2)
+        self.action_dim = 2 * self.dof + 2  # Both arms + both grippers
 
         print(f"Robot: {robot_type}, DoF per arm: {self.dof}")
-        print(f"Action dim: {self.action_dim}, Horizon: {action_horizon}")
+        print(f"Action dim: {self.action_dim} (joints: {2*self.dof}, grippers: 2), Horizon: {action_horizon}")
 
         # State for tracking
         self.current_qpos = None
@@ -244,7 +251,7 @@ State: [{state_str}]"""
         # Prepare images
         images = self._prepare_images(observation)
 
-        # Get current state
+        # Get current state (joints only) and grippers
         state = self._get_state_vector(observation)
         grippers = self._get_gripper_state(observation)
 
@@ -256,11 +263,15 @@ State: [{state_str}]"""
             [observation["joint_action"]["right_gripper"]],
         ])
 
-        # Normalize state for prompt
+        # Normalize state and grippers for prompt (must match training format)
         normalized_state = self.normalizer.normalize_state(state, self.robot_type)
+        normalized_grippers = self.normalizer.normalize_grippers(grippers, self.robot_type)
+
+        # Concatenate normalized state and grippers: (2*dof + 2,) to match training
+        normalized_state_with_grippers = np.concatenate([normalized_state, normalized_grippers])
 
         # Discretize to [0, 255] for prompt
-        discretized_state = discretize_normalized_values(normalized_state, num_bins=256)
+        discretized_state = discretize_normalized_values(normalized_state_with_grippers, num_bins=256)
 
         # Build prompt text
         prompt_text = self._build_prompt(instruction, discretized_state)
@@ -298,13 +309,15 @@ State: [{state_str}]"""
             torch.cuda.synchronize() if self.device.startswith("cuda") else None
             start_time = time.perf_counter()
 
+            # Use sampling if temperature > 0, otherwise greedy decoding
+            do_sample = self.temperature > 0
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
-                do_sample=False,  # Greedy decoding for actions
-                temperature=None,  # Not used with greedy decoding
-                top_p=None,        # Not used with greedy decoding
-                top_k=None,        # Not used with greedy decoding
+                do_sample=do_sample,
+                temperature=self.temperature if do_sample else None,
+                top_p=self.top_p if do_sample else None,
+                top_k=None,
                 pad_token_id=self.processor.tokenizer.pad_token_id,
                 eos_token_id=[self.EOT_TOKEN_ID],  # Stop at EOT token
                 use_cache=True,  # Enable KV caching (should be default, but explicit)
@@ -369,19 +382,30 @@ State: [{state_str}]"""
             # Return zero deltas on error
             return np.zeros((self.action_horizon, 14))
 
-        # Denormalize delta actions
-        delta_actions = self.normalizer.denormalize_delta_actions(
-            normalized_deltas,
+        # Split normalized_deltas into joint deltas and gripper values
+        # normalized_deltas shape: (action_horizon, 2*dof + 2) = (action_horizon, 14)
+        joint_dim = 2 * self.dof  # 12 for 6-DoF dual-arm
+        normalized_joint_deltas = normalized_deltas[:, :joint_dim]
+        normalized_grippers = normalized_deltas[:, joint_dim:]
+
+        # Denormalize joint deltas and gripper values separately
+        delta_joints = self.normalizer.denormalize_delta_actions(
+            normalized_joint_deltas,
+            robot_type=self.robot_type,
+        )
+        future_grippers = self.normalizer.denormalize_grippers(
+            normalized_grippers,
             robot_type=self.robot_type,
         )
 
-        # Convert delta actions to absolute qpos
-        actions = self._delta_to_absolute(delta_actions, grippers)
+        # Convert delta joint actions to absolute qpos, with predicted grippers
+        actions = self._delta_to_absolute(delta_joints, future_grippers)
 
         if self.debug_actions:
-            print(f"    Delta actions shape: {delta_actions.shape}, range: [{delta_actions.min():.4f}, {delta_actions.max():.4f}]")
-            print(f"    Delta actions (decoded from model):")
-            for i, delta in enumerate(delta_actions):
+            print(f"    Delta joints shape: {delta_joints.shape}, range: [{delta_joints.min():.4f}, {delta_joints.max():.4f}]")
+            print(f"    Future grippers shape: {future_grippers.shape}, range: [{future_grippers.min():.4f}, {future_grippers.max():.4f}]")
+            print(f"    Delta joints (decoded from model):")
+            for i, delta in enumerate(delta_joints):
                 print(f"      Delta[{i:2d}]: [{', '.join(f'{x:8.4f}' for x in delta)}]")
 
         self.step_count += 1
@@ -390,15 +414,15 @@ State: [{state_str}]"""
 
     def _delta_to_absolute(
         self,
-        delta_actions: np.ndarray,
-        current_grippers: np.ndarray,
+        delta_joints: np.ndarray,
+        future_grippers: np.ndarray,
     ) -> np.ndarray:
         """
-        Convert delta actions to absolute joint positions.
+        Convert delta joint actions to absolute joint positions.
 
         Args:
-            delta_actions: Delta actions (action_horizon, 2*dof)
-            current_grippers: Current gripper states (2,)
+            delta_joints: Delta actions for joints (action_horizon, 2*dof)
+            future_grippers: Predicted gripper positions (action_horizon, 2)
 
         Returns:
             Absolute actions (action_horizon, 14) with grippers
@@ -409,24 +433,23 @@ State: [{state_str}]"""
             self.current_qpos[self.dof + 1:self.dof + 1 + self.dof],  # right arm
         ])
 
-        # Accumulate deltas
-        absolute_arm = np.zeros_like(delta_actions)
-        for t in range(delta_actions.shape[0]):
+        # Accumulate deltas for joint positions
+        absolute_arm = np.zeros_like(delta_joints)
+        for t in range(delta_joints.shape[0]):
             if t == 0:
-                absolute_arm[t] = current_arm_pos + delta_actions[t]
+                absolute_arm[t] = current_arm_pos + delta_joints[t]
             else:
-                absolute_arm[t] = absolute_arm[t-1] + delta_actions[t]
+                absolute_arm[t] = absolute_arm[t-1] + delta_joints[t]
 
-        # Add grippers (not in delta space - keep current or interpolate)
-        # For now, keep grippers constant (can be improved)
-        actions = np.zeros((delta_actions.shape[0], 14))
+        # Combine joint positions with predicted gripper values
+        actions = np.zeros((delta_joints.shape[0], 14))
 
-        for t in range(delta_actions.shape[0]):
+        for t in range(delta_joints.shape[0]):
             # Left arm (6) + left gripper (1) + right arm (6) + right gripper (1)
             actions[t, :self.dof] = absolute_arm[t, :self.dof]
-            actions[t, self.dof] = current_grippers[0]  # left gripper
+            actions[t, self.dof] = future_grippers[t, 0]  # left gripper (predicted)
             actions[t, self.dof + 1:self.dof + 1 + self.dof] = absolute_arm[t, self.dof:]
-            actions[t, -1] = current_grippers[1]  # right gripper
+            actions[t, -1] = future_grippers[t, 1]  # right gripper (predicted)
 
         return actions
 
@@ -449,6 +472,8 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
             - action_horizon: Action prediction horizon (default: 16)
             - robot_type: Robot type (default: "aloha-agilex")
             - device: CUDA device (default: "cuda:0")
+            - temperature: Sampling temperature (default: 0.6, 0 for greedy)
+            - top_p: Nucleus sampling top-p (default: 0.95)
 
     Returns:
         Qwen3VLAPolicy instance
@@ -467,6 +492,8 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     robot_type = usr_args.get("robot_type", "aloha-agilex")
     device = usr_args.get("device", "cuda:0")
     debug_actions = usr_args.get("debug_actions", False)
+    temperature = usr_args.get("temperature", 0.6)
+    top_p = usr_args.get("top_p", 0.95)
 
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
@@ -475,6 +502,8 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         robot_type=robot_type,
         device=device,
         debug_actions=debug_actions,
+        temperature=temperature,
+        top_p=top_p,
     )
 
     return _policy_instance

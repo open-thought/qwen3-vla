@@ -179,7 +179,7 @@ State: [{state_str}]"""
         Args:
             token_ids: Predicted token IDs (batch, seq_len)
             action_horizon: Action prediction horizon
-            action_dim: Action dimension (2*dof)
+            action_dim: Action dimension (2*dof + 2 for joints + grippers)
             normalizer: MultiRobotNormalizer instance
             robot_type: Robot type for denormalization
 
@@ -246,7 +246,7 @@ def test_collator():
             "head_camera": torch.rand(3, 256, 256),
             "task_description": f"Task {i}: Pick up the object",
             "robot_type": "aloha-agilex",
-            "discretized_state": torch.randint(0, 256, (12,)).numpy(),
+            "discretized_state": torch.randint(0, 256, (14,)).numpy(),  # 12 joints + 2 grippers
             "action_tokens": torch.randint(151936, 153984, (30 + i * 5,)).tolist(),
         }
         dummy_samples.append(sample)
