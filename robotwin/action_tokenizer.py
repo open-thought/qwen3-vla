@@ -61,6 +61,9 @@ class BinTokenizer(BaseActionTokenizer):
     One token per action dimension, so action_horizon * action_dim tokens total.
 
     This is simpler than FAST but produces more tokens.
+
+    For exact zero reconstruction, use n_bins=257 (odd number) so that
+    one bin center falls exactly at 0.
     """
 
     def __init__(
@@ -73,7 +76,8 @@ class BinTokenizer(BaseActionTokenizer):
         Initialize bin tokenizer.
 
         Args:
-            n_bins: Number of bins for discretization (default: 256)
+            n_bins: Number of bins for discretization (default: 256).
+                    Use 257 for exact zero reconstruction (bin center at 0).
             min_action: Minimum action value (default: -1.0)
             max_action: Maximum action value (default: 1.0)
         """
@@ -81,16 +85,31 @@ class BinTokenizer(BaseActionTokenizer):
         self.min_action = min_action
         self.max_action = max_action
 
-        # Create uniform bins and bin centers
-        self.bins = np.linspace(min_action, max_action, n_bins)
-        self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
+        # Create uniform bin centers directly
+        # With n_bins centers from min to max, we get exact 0 when n_bins is odd
+        # and min_action = -max_action
+        self.bin_centers = np.linspace(min_action, max_action, n_bins)
+
+        # Compute bin edges (boundaries between centers)
+        # Each bin spans from midpoint to previous center to midpoint to next center
+        half_width = (self.bin_centers[1] - self.bin_centers[0]) / 2.0 if n_bins > 1 else 0.5
+        self.bin_edges = np.concatenate([
+            [min_action - half_width],  # Left edge of first bin
+            (self.bin_centers[:-1] + self.bin_centers[1:]) / 2.0,  # Edges between bins
+            [max_action + half_width],  # Right edge of last bin
+        ])
 
         # Vocabulary size is the number of bins
         self._vocab_size = n_bins
 
+        # Check if 0 is a bin center (for informational purposes)
+        zero_is_center = any(np.isclose(self.bin_centers, 0.0, atol=1e-10))
+
         print(f"Initialized BinTokenizer")
         print(f"  Bins: {n_bins}")
         print(f"  Action range: [{min_action}, {max_action}]")
+        print(f"  Bin width: {2.0 * half_width:.6f}")
+        print(f"  Zero is bin center: {zero_is_center}")
         print(f"  Token range: [{self.VOCAB_OFFSET}, {self.VOCAB_OFFSET + n_bins - 1}]")
 
     @property
@@ -128,12 +147,13 @@ class BinTokenizer(BaseActionTokenizer):
         # Clip to valid range
         clipped = np.clip(normalized_actions, self.min_action, self.max_action)
 
-        # Digitize: map continuous values to bin indices (1 to n_bins)
-        # np.digitize returns indices in [1, n_bins] for values in [min, max]
-        discretized = np.digitize(clipped, self.bins)
+        # Digitize using bin edges: find which bin each value falls into
+        # np.digitize returns indices in [0, n_bins] for bin_edges with n_bins+1 edges
+        # We want indices in [0, n_bins-1]
+        discretized = np.digitize(clipped, self.bin_edges[1:])  # Skip first edge
 
-        # Clip to valid bin range [1, n_bins] and convert to 0-indexed [0, n_bins-1]
-        discretized = np.clip(discretized, 1, self.n_bins) - 1
+        # Clip to valid bin range [0, n_bins-1]
+        discretized = np.clip(discretized, 0, self.n_bins - 1)
 
         # Flatten to (batch, action_horizon * action_dim) and add vocab offset
         tokens_flat = discretized.reshape(batch_size, -1) + self.VOCAB_OFFSET
@@ -357,6 +377,7 @@ ActionTokenizer = FASTTokenizer
 
 def create_action_tokenizer(
     tokenizer_type: Literal["fast", "bin"] = "fast",
+    n_bins: int = 256,
     **kwargs
 ) -> BaseActionTokenizer:
     """
@@ -366,6 +387,8 @@ def create_action_tokenizer(
         tokenizer_type: Type of tokenizer to create
             - "fast": FAST tokenizer (compressed, variable-length output)
             - "bin": Simple bin tokenizer (OpenVLA-style, fixed-length output)
+        n_bins: Number of bins for BinTokenizer (default: 256).
+                Use 257 for exact zero reconstruction (bin center at 0).
         **kwargs: Additional arguments passed to the tokenizer constructor
 
     Returns:
@@ -374,7 +397,7 @@ def create_action_tokenizer(
     if tokenizer_type == "fast":
         return FASTTokenizer(**kwargs)
     elif tokenizer_type == "bin":
-        return BinTokenizer(**kwargs)
+        return BinTokenizer(n_bins=n_bins, **kwargs)
     else:
         raise ValueError(f"Unknown tokenizer type: {tokenizer_type}. Must be 'fast' or 'bin'.")
 

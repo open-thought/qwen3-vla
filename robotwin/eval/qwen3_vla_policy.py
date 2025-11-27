@@ -19,6 +19,9 @@ from PIL import Image
 from typing import Optional
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
+# Enable flash SDP for better performance with PyTorch 2.9+
+torch.backends.cuda.enable_flash_sdp(True)
+
 from action_tokenizer import create_action_tokenizer
 from normalization import MultiRobotNormalizer, discretize_normalized_values
 
@@ -53,6 +56,9 @@ class Qwen3VLAPolicy:
         temperature: float = 0.6,  # Sampling temperature (0 for greedy)
         top_p: float = 0.95,  # Nucleus sampling top-p
         tokenizer_type: str = "fast",  # "fast" or "bin"
+        n_bins: int = 256,  # Number of bins for BinTokenizer (use 257 for exact zero)
+        symmetric_delta_norm: bool = False,  # Use symmetric normalization (0 maps to 0)
+        execute_steps: int = None,  # Default execute steps (None = full action_horizon)
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -69,6 +75,10 @@ class Qwen3VLAPolicy:
             temperature: Sampling temperature (0 for greedy decoding)
             top_p: Nucleus sampling top-p value
             tokenizer_type: Type of action tokenizer ("fast" or "bin")
+            n_bins: Number of bins for BinTokenizer (default: 256, use 257 for exact zero)
+            symmetric_delta_norm: Use symmetric normalization for delta actions (0 maps to 0)
+            execute_steps: Default number of steps to decode/execute. If None, uses full action_horizon.
+                          For BinTokenizer, this limits tokens to execute_steps * action_dim.
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -80,6 +90,9 @@ class Qwen3VLAPolicy:
         self.temperature = temperature
         self.top_p = top_p
         self.tokenizer_type = tokenizer_type
+        self.n_bins = n_bins
+        self.symmetric_delta_norm = symmetric_delta_norm
+        self.default_execute_steps = execute_steps
 
         # Timing statistics
         self.total_generate_time = 0.0
@@ -107,12 +120,12 @@ class Qwen3VLAPolicy:
 
         # Load action tokenizer
         print(f"Loading {tokenizer_type.upper()} action tokenizer...")
-        self.action_tokenizer = create_action_tokenizer(tokenizer_type)
+        self.action_tokenizer = create_action_tokenizer(tokenizer_type, n_bins=n_bins)
         self.action_token_start, self.action_token_end = self.action_tokenizer.get_token_range()
 
         # Load normalizer
         print(f"Loading normalization stats from {norm_stats_path}...")
-        self.normalizer = MultiRobotNormalizer(norm_stats_path)
+        self.normalizer = MultiRobotNormalizer(norm_stats_path, symmetric_delta_norm=symmetric_delta_norm)
 
         # Get robot metadata
         metadata = self.normalizer.get_robot_metadata(robot_type)
@@ -240,6 +253,7 @@ State: [{state_str}]"""
         self,
         observation: dict,
         instruction: str,
+        execute_steps: int = None,
     ) -> np.ndarray:
         """
         Get action from observation and instruction.
@@ -247,10 +261,21 @@ State: [{state_str}]"""
         Args:
             observation: RoboTwin observation dict
             instruction: Task instruction text
+            execute_steps: Number of timesteps to decode (for BinTokenizer optimization).
+                          If None, decodes full action_horizon. For BinTokenizer, this
+                          limits tokens to execute_steps * action_dim.
 
         Returns:
-            Actions array (action_horizon, 14) - full qpos including grippers
+            Actions array (decode_steps, 14) - full qpos including grippers
         """
+        # Determine how many timesteps to decode
+        # Priority: argument > instance default > full action_horizon
+        if execute_steps is not None:
+            decode_steps = execute_steps
+        elif self.default_execute_steps is not None:
+            decode_steps = self.default_execute_steps
+        else:
+            decode_steps = self.action_horizon
         # Prepare images
         images = self._prepare_images(observation)
 
@@ -355,12 +380,22 @@ State: [{state_str}]"""
             if self.action_token_start <= t <= self.action_token_end:
                 action_tokens.append(t)
 
+        # For BinTokenizer, limit tokens to decode_steps * action_dim
+        # This avoids decoding future actions we won't use
+        if self.tokenizer_type == "bin":
+            max_tokens_needed = decode_steps * self.action_dim
+            if len(action_tokens) > max_tokens_needed:
+                action_tokens = action_tokens[:max_tokens_needed]
+
         if self.debug_actions:
             # Print state info to verify it's changing between calls
             print(f"    State (first 6): [{', '.join(f'{x:.4f}' for x in state[:6])}]")
             print(f"    Discretized (first 6): [{', '.join(str(int(x)) for x in discretized_state[:6])}]")
             tokens_no_offset = [t - self.action_token_start for t in action_tokens]
-            print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}): {tokens_no_offset}")
+            if self.tokenizer_type == "bin":
+                print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}, decode_steps={decode_steps}): {tokens_no_offset[:28]}{'...' if len(tokens_no_offset) > 28 else ''}")
+            else:
+                print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}): {tokens_no_offset}")
             if self.num_generate_calls <= 2:
                 # Print full prompt on first few calls
                 print(f"    Prompt: {prompt_text}")
@@ -370,10 +405,12 @@ State: [{state_str}]"""
             return self._get_no_movement_actions()
 
         # Decode action tokens to normalized delta actions
+        # For BinTokenizer with limited tokens, decode only the steps we have
+        effective_horizon = decode_steps if self.tokenizer_type == "bin" else self.action_horizon
         try:
             normalized_deltas = self.action_tokenizer.decode(
                 [action_tokens],
-                action_horizon=self.action_horizon,
+                action_horizon=effective_horizon,
                 action_dim=self.action_dim,
             )[0]  # Remove batch dim
         except Exception as e:
@@ -491,6 +528,9 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
             - temperature: Sampling temperature (default: 0.6, 0 for greedy)
             - top_p: Nucleus sampling top-p (default: 0.95)
             - tokenizer_type: Action tokenizer type ("fast" or "bin", default: "fast")
+            - n_bins: Number of bins for BinTokenizer (default: 256, use 257 for exact zero)
+            - symmetric_delta_norm: Use symmetric normalization (default: False)
+            - execute_steps: Default steps to decode/execute (default: None = full horizon)
 
     Returns:
         Qwen3VLAPolicy instance
@@ -512,6 +552,9 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     temperature = usr_args.get("temperature", 0.6)
     top_p = usr_args.get("top_p", 0.95)
     tokenizer_type = usr_args.get("tokenizer_type", "fast")
+    n_bins = usr_args.get("n_bins", 256)
+    symmetric_delta_norm = usr_args.get("symmetric_delta_norm", False)
+    execute_steps = usr_args.get("execute_steps", None)
 
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
@@ -523,6 +566,9 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         temperature=temperature,
         top_p=top_p,
         tokenizer_type=tokenizer_type,
+        n_bins=n_bins,
+        symmetric_delta_norm=symmetric_delta_norm,
+        execute_steps=execute_steps,
     )
 
     return _policy_instance
@@ -540,6 +586,8 @@ def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict, execute_steps: int 
                        1 = closed-loop (re-predict after each step)
                        action_horizon = open-loop (execute full chunk)
                        Default: 1 (closed-loop for better accuracy)
+                       For BinTokenizer, this also limits token decoding to
+                       execute_steps * action_dim tokens.
 
     Returns:
         Updated observation after executing actions
@@ -547,8 +595,8 @@ def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict, execute_steps: int 
     # Get instruction from environment
     instruction = TASK_ENV.get_instruction()
 
-    # Get actions from model
-    actions = model.get_action(observation, instruction)
+    # Get actions from model (pass execute_steps for BinTokenizer optimization)
+    actions = model.get_action(observation, instruction, execute_steps=execute_steps)
 
     # Execute only the first `execute_steps` actions, then return for re-prediction
     steps_to_execute = min(execute_steps, len(actions))

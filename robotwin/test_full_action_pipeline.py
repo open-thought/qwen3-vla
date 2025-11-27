@@ -8,6 +8,8 @@ Tests the complete roundtrip for both FAST and BinTokenizer:
 4. Detokenizes back to normalized actions
 5. Splits and denormalizes joints and grippers separately
 6. Verifies reconstruction matches original (within tokenizer compression tolerance)
+
+Supports testing with symmetric normalization (n_bins=257) for exact zero reconstruction.
 """
 
 import numpy as np
@@ -18,14 +20,21 @@ from action_tokenizer import create_action_tokenizer, FASTTokenizer, BinTokenize
 from normalization import MultiRobotNormalizer
 
 
-def test_full_action_pipeline(tokenizer_type: str = "fast"):
+def test_full_action_pipeline(
+    tokenizer_type: str = "fast",
+    n_bins: int = 256,
+    symmetric_delta_norm: bool = False,
+):
     """Test the complete action tokenization pipeline including grippers.
 
     Args:
         tokenizer_type: "fast" or "bin"
+        n_bins: Number of bins for BinTokenizer (256 legacy, 257 for exact zero)
+        symmetric_delta_norm: Use symmetric normalization for delta actions
     """
     print("=" * 80)
-    print(f"FULL ACTION PIPELINE TEST (with grippers) - {tokenizer_type.upper()} Tokenizer")
+    mode_str = "symmetric" if symmetric_delta_norm else "legacy"
+    print(f"FULL ACTION PIPELINE TEST - {tokenizer_type.upper()} Tokenizer ({n_bins} bins, {mode_str})")
     print("=" * 80)
 
     # Load dataset
@@ -42,6 +51,8 @@ def test_full_action_pipeline(tokenizer_type: str = "fast"):
         cache_size=5,
         enable_augmentation=False,
         tokenizer_type=tokenizer_type,
+        n_bins=n_bins,
+        symmetric_delta_norm=symmetric_delta_norm,
     )
     print(f"   Dataset size: {len(dataset)}")
 
@@ -88,8 +99,8 @@ def test_full_action_pipeline(tokenizer_type: str = "fast"):
     # Now simulate the evaluation pipeline (as in qwen3_vla_policy.py)
     print("\n6. Simulating evaluation pipeline (decode tokens)...")
 
-    tokenizer = create_action_tokenizer(tokenizer_type)
-    normalizer = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json")
+    tokenizer = create_action_tokenizer(tokenizer_type, n_bins=n_bins)
+    normalizer = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json", symmetric_delta_norm=symmetric_delta_norm)
 
     # Decode tokens back to normalized actions
     # action_dim = 14 (12 joints + 2 grippers)
@@ -169,11 +180,16 @@ def test_full_action_pipeline(tokenizer_type: str = "fast"):
     # Assertions
     print("\n12. Running assertions...")
 
-    # Set error thresholds based on tokenizer type
+    # Set error thresholds based on tokenizer type and normalization mode
     # FAST has compression loss, Bin is more precise (256 bins = ~0.008 bin width)
     if tokenizer_type == "bin":
-        joint_threshold = 0.02  # BinTokenizer is more precise
-        gripper_threshold = 0.02
+        if symmetric_delta_norm and n_bins == 257:
+            # Symmetric + 257 bins should have minimal error
+            joint_threshold = 0.015
+            gripper_threshold = 0.015
+        else:
+            joint_threshold = 0.02  # BinTokenizer is more precise
+            gripper_threshold = 0.02
     else:
         joint_threshold = 0.1  # FAST compression has more loss
         gripper_threshold = 0.1
@@ -196,11 +212,13 @@ def test_full_action_pipeline(tokenizer_type: str = "fast"):
     dataset.close()
 
     print("\n" + "=" * 80)
-    print(f"✅ FULL ACTION PIPELINE TEST PASSED ({tokenizer_type.upper()})")
+    print(f"✅ FULL ACTION PIPELINE TEST PASSED ({tokenizer_type.upper()}, {n_bins} bins, {mode_str})")
     print("=" * 80)
 
     return {
         "tokenizer_type": tokenizer_type,
+        "n_bins": n_bins,
+        "symmetric_delta_norm": symmetric_delta_norm,
         "joint_mae": joint_mae,
         "joint_max_error": joint_max_error,
         "gripper_mae": gripper_mae,
@@ -208,21 +226,29 @@ def test_full_action_pipeline(tokenizer_type: str = "fast"):
     }
 
 
-def test_multiple_samples(tokenizer_type: str = "fast"):
+def test_multiple_samples(
+    tokenizer_type: str = "fast",
+    n_bins: int = 256,
+    symmetric_delta_norm: bool = False,
+):
     """Test pipeline on multiple samples to get statistics.
 
     Args:
         tokenizer_type: "fast" or "bin"
+        n_bins: Number of bins for BinTokenizer (256 legacy, 257 for exact zero)
+        symmetric_delta_norm: Use symmetric normalization for delta actions
     """
+    mode_str = "symmetric" if symmetric_delta_norm else "legacy"
     print("\n" + "=" * 80)
-    print(f"TESTING MULTIPLE SAMPLES - {tokenizer_type.upper()} Tokenizer")
+    print(f"TESTING MULTIPLE SAMPLES - {tokenizer_type.upper()} Tokenizer ({n_bins} bins, {mode_str})")
     print("=" * 80)
 
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/robotwin_norm_stats_h16.json",
+        norm_stats_path="data/robotwin_norm_stats_h8.json",
         episode_lengths_path="data/robotwin_episode_lengths.json",
-        action_horizon=16,
+        valid_timesteps_path="data/robotwin_valid_timesteps_h8.json",
+        action_horizon=8,
         image_size=(320, 240),
         tasks=["beat_block_hammer"],
         robot_types=["aloha-agilex"],
@@ -230,10 +256,12 @@ def test_multiple_samples(tokenizer_type: str = "fast"):
         cache_size=5,
         enable_augmentation=False,
         tokenizer_type=tokenizer_type,
+        n_bins=n_bins,
+        symmetric_delta_norm=symmetric_delta_norm,
     )
 
-    tokenizer = create_action_tokenizer(tokenizer_type)
-    normalizer = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json")
+    tokenizer = create_action_tokenizer(tokenizer_type, n_bins=n_bins)
+    normalizer = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json", symmetric_delta_norm=symmetric_delta_norm)
 
     joint_maes = []
     gripper_maes = []
@@ -279,16 +307,18 @@ def test_multiple_samples(tokenizer_type: str = "fast"):
 
     dataset.close()
 
-    print(f"\nResults over {num_samples} samples ({tokenizer_type.upper()}):")
+    print(f"\nResults over {num_samples} samples ({tokenizer_type.upper()}, {n_bins} bins, {mode_str}):")
     print(f"  Joint delta MAE:  mean={np.mean(joint_maes):.6f}, std={np.std(joint_maes):.6f}, max={np.max(joint_maes):.6f}")
     print(f"  Gripper MAE:      mean={np.mean(gripper_maes):.6f}, std={np.std(gripper_maes):.6f}, max={np.max(gripper_maes):.6f}")
 
     print("\n" + "=" * 80)
-    print(f"✅ MULTIPLE SAMPLES TEST PASSED ({tokenizer_type.upper()})")
+    print(f"✅ MULTIPLE SAMPLES TEST PASSED ({tokenizer_type.upper()}, {n_bins} bins, {mode_str})")
     print("=" * 80)
 
     return {
         "tokenizer_type": tokenizer_type,
+        "n_bins": n_bins,
+        "symmetric_delta_norm": symmetric_delta_norm,
         "joint_mae_mean": np.mean(joint_maes),
         "joint_mae_std": np.std(joint_maes),
         "gripper_mae_mean": np.mean(gripper_maes),
@@ -308,33 +338,94 @@ def test_both_tokenizers():
     print("\n>>> Testing FAST tokenizer <<<")
     results["fast"] = test_full_action_pipeline("fast")
 
-    # Test BIN tokenizer
-    print("\n>>> Testing BIN tokenizer <<<")
-    results["bin"] = test_full_action_pipeline("bin")
+    # Test BIN tokenizer (legacy: 256 bins, asymmetric)
+    print("\n>>> Testing BIN tokenizer (legacy: 256 bins) <<<")
+    results["bin_legacy"] = test_full_action_pipeline("bin", n_bins=256, symmetric_delta_norm=False)
 
-    # Test multiple samples with both
+    # Test BIN tokenizer (new: 257 bins, symmetric)
+    print("\n>>> Testing BIN tokenizer (symmetric: 257 bins) <<<")
+    results["bin_symmetric"] = test_full_action_pipeline("bin", n_bins=257, symmetric_delta_norm=True)
+
+    # Test multiple samples with all
     print("\n>>> Testing multiple samples with FAST <<<")
     fast_stats = test_multiple_samples("fast")
 
-    print("\n>>> Testing multiple samples with BIN <<<")
-    bin_stats = test_multiple_samples("bin")
+    print("\n>>> Testing multiple samples with BIN (legacy) <<<")
+    bin_legacy_stats = test_multiple_samples("bin", n_bins=256, symmetric_delta_norm=False)
+
+    print("\n>>> Testing multiple samples with BIN (symmetric) <<<")
+    bin_symmetric_stats = test_multiple_samples("bin", n_bins=257, symmetric_delta_norm=True)
 
     # Print comparison summary
     print("\n" + "=" * 80)
     print("TOKENIZER COMPARISON SUMMARY")
     print("=" * 80)
     print(f"\nSingle sample results:")
-    print(f"  FAST: Joint MAE={results['fast']['joint_mae']:.6f}, Gripper MAE={results['fast']['gripper_mae']:.6f}")
-    print(f"  BIN:  Joint MAE={results['bin']['joint_mae']:.6f}, Gripper MAE={results['bin']['gripper_mae']:.6f}")
+    print(f"  FAST:          Joint MAE={results['fast']['joint_mae']:.6f}, Gripper MAE={results['fast']['gripper_mae']:.6f}")
+    print(f"  BIN (legacy):  Joint MAE={results['bin_legacy']['joint_mae']:.6f}, Gripper MAE={results['bin_legacy']['gripper_mae']:.6f}")
+    print(f"  BIN (symm):    Joint MAE={results['bin_symmetric']['joint_mae']:.6f}, Gripper MAE={results['bin_symmetric']['gripper_mae']:.6f}")
 
     print(f"\nMultiple samples results (mean ± std):")
-    print(f"  FAST: Joint MAE={fast_stats['joint_mae_mean']:.6f}±{fast_stats['joint_mae_std']:.6f}, "
+    print(f"  FAST:          Joint MAE={fast_stats['joint_mae_mean']:.6f}±{fast_stats['joint_mae_std']:.6f}, "
           f"Gripper MAE={fast_stats['gripper_mae_mean']:.6f}±{fast_stats['gripper_mae_std']:.6f}")
-    print(f"  BIN:  Joint MAE={bin_stats['joint_mae_mean']:.6f}±{bin_stats['joint_mae_std']:.6f}, "
-          f"Gripper MAE={bin_stats['gripper_mae_mean']:.6f}±{bin_stats['gripper_mae_std']:.6f}")
+    print(f"  BIN (legacy):  Joint MAE={bin_legacy_stats['joint_mae_mean']:.6f}±{bin_legacy_stats['joint_mae_std']:.6f}, "
+          f"Gripper MAE={bin_legacy_stats['gripper_mae_mean']:.6f}±{bin_legacy_stats['gripper_mae_std']:.6f}")
+    print(f"  BIN (symm):    Joint MAE={bin_symmetric_stats['joint_mae_mean']:.6f}±{bin_symmetric_stats['joint_mae_std']:.6f}, "
+          f"Gripper MAE={bin_symmetric_stats['gripper_mae_mean']:.6f}±{bin_symmetric_stats['gripper_mae_std']:.6f}")
 
     print("\n" + "=" * 80)
     print("✅ ALL TOKENIZER TESTS PASSED")
+    print("=" * 80)
+
+
+def test_zero_reconstruction():
+    """Test that zeros are reconstructed exactly with symmetric normalization."""
+    print("\n" + "=" * 80)
+    print("TESTING ZERO RECONSTRUCTION (symmetric normalization)")
+    print("=" * 80)
+
+    from normalization import MultiRobotNormalizer
+    from action_tokenizer import BinTokenizer
+
+    # Test legacy (should NOT be exact)
+    print("\n1. Legacy mode (256 bins, asymmetric):")
+    norm_legacy = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json", symmetric_delta_norm=False)
+    tok_legacy = BinTokenizer(n_bins=256)
+
+    zeros = np.zeros((4, 12), dtype=np.float32)
+    normalized = norm_legacy.normalize_delta_actions(zeros, "aloha-agilex")
+    tokens = tok_legacy.encode(normalized[None, :])
+    decoded_norm = tok_legacy.decode(tokens, action_horizon=4, action_dim=12)[0]
+    decoded = norm_legacy.denormalize_delta_actions(decoded_norm, "aloha-agilex")
+
+    legacy_max_error = np.abs(decoded).max()
+    print(f"   Max error for zeros: {legacy_max_error:.6f}")
+    print(f"   Decoded first row: {decoded[0, :6]}")
+
+    # Test symmetric (should be exact)
+    print("\n2. Symmetric mode (257 bins, symmetric):")
+    norm_sym = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json", symmetric_delta_norm=True)
+    tok_sym = BinTokenizer(n_bins=257)
+
+    normalized = norm_sym.normalize_delta_actions(zeros, "aloha-agilex")
+    tokens = tok_sym.encode(normalized[None, :])
+    decoded_norm = tok_sym.decode(tokens, action_horizon=4, action_dim=12)[0]
+    decoded = norm_sym.denormalize_delta_actions(decoded_norm, "aloha-agilex")
+
+    sym_max_error = np.abs(decoded).max()
+    print(f"   Max error for zeros: {sym_max_error:.6f}")
+    print(f"   Decoded first row: {decoded[0, :6]}")
+
+    # Assertions
+    print("\n3. Assertions:")
+    assert sym_max_error < 1e-9, f"Symmetric mode should have zero error, got {sym_max_error}"
+    print(f"   ✓ Symmetric mode has zero error")
+
+    assert legacy_max_error > 0.0001, f"Legacy mode should have non-zero error"
+    print(f"   ✓ Legacy mode has non-zero error (expected)")
+
+    print("\n" + "=" * 80)
+    print("✅ ZERO RECONSTRUCTION TEST PASSED")
     print("=" * 80)
 
 
@@ -345,13 +436,23 @@ if __name__ == "__main__":
         "--tokenizer", "-t",
         type=str,
         default="both",
-        choices=["fast", "bin", "both"],
+        choices=["fast", "bin", "bin-symmetric", "both"],
         help="Which tokenizer to test (default: both)"
+    )
+    parser.add_argument(
+        "--test-zeros",
+        action="store_true",
+        help="Run zero reconstruction test"
     )
     args = parser.parse_args()
 
-    if args.tokenizer == "both":
+    if args.test_zeros:
+        test_zero_reconstruction()
+    elif args.tokenizer == "both":
         test_both_tokenizers()
+    elif args.tokenizer == "bin-symmetric":
+        test_full_action_pipeline("bin", n_bins=257, symmetric_delta_norm=True)
+        test_multiple_samples("bin", n_bins=257, symmetric_delta_norm=True)
     else:
         test_full_action_pipeline(args.tokenizer)
         test_multiple_samples(args.tokenizer)

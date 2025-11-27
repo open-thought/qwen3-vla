@@ -19,19 +19,26 @@ class MultiRobotNormalizer:
 
     Each robot type has its own normalization statistics (q01, q99 percentiles).
     Normalizes values to [-1, 1] range and handles denormalization.
+
+    Supports two normalization modes for delta actions:
+    - "asymmetric" (default, legacy): Maps q01 → -1, q99 → +1. Zero may not map to exactly 0.
+    - "symmetric": Uses max(|q01|, |q99|) as scale so that 0 maps to exactly 0.
     """
 
-    def __init__(self, stats_path: str):
+    def __init__(self, stats_path: str, symmetric_delta_norm: bool = False):
         """
         Initialize normalizer with statistics from JSON file.
 
         Args:
             stats_path: Path to JSON file containing normalization statistics
+            symmetric_delta_norm: If True, use symmetric normalization for delta actions
+                                  where 0 maps to exactly 0. Default False for backward compatibility.
         """
         with open(stats_path, "r") as f:
             self.stats = json.load(f)
 
         self.robot_types = list(self.stats.keys())
+        self.symmetric_delta_norm = symmetric_delta_norm
 
         # Convert lists to numpy arrays for faster operations
         for robot_type in self.robot_types:
@@ -41,6 +48,15 @@ class MultiRobotNormalizer:
                 )
                 self.stats[robot_type][category]["q99"] = np.array(
                     self.stats[robot_type][category]["q99"]
+                )
+
+            # Pre-compute symmetric scale for delta actions if needed
+            if symmetric_delta_norm:
+                q01 = self.stats[robot_type]["delta_actions"]["q01"]
+                q99 = self.stats[robot_type]["delta_actions"]["q99"]
+                # Use max of absolute values so 0 maps to exactly 0
+                self.stats[robot_type]["delta_actions"]["symmetric_scale"] = np.maximum(
+                    np.abs(q01), np.abs(q99)
                 )
 
     def normalize_state(
@@ -114,11 +130,18 @@ class MultiRobotNormalizer:
         Returns:
             Normalized delta actions in [-1, 1] range
         """
-        q01 = self.stats[robot_type]["delta_actions"]["q01"]
-        q99 = self.stats[robot_type]["delta_actions"]["q99"]
-
-        # Normalize to [-1, 1]
-        normalized = 2.0 * (delta_actions - q01) / (q99 - q01 + 1e-8) - 1.0
+        if self.symmetric_delta_norm:
+            # Symmetric normalization: 0 maps to exactly 0
+            scale = self.stats[robot_type]["delta_actions"]["symmetric_scale"]
+            normalized = delta_actions / (scale + 1e-8)
+            # Clip to [-1, 1] for values outside the expected range
+            normalized = np.clip(normalized, -1.0, 1.0)
+        else:
+            # Legacy asymmetric normalization
+            q01 = self.stats[robot_type]["delta_actions"]["q01"]
+            q99 = self.stats[robot_type]["delta_actions"]["q99"]
+            # Normalize to [-1, 1]
+            normalized = 2.0 * (delta_actions - q01) / (q99 - q01 + 1e-8) - 1.0
 
         if return_torch:
             return torch.from_numpy(normalized).float()
@@ -142,11 +165,17 @@ class MultiRobotNormalizer:
         if isinstance(normalized_deltas, torch.Tensor):
             normalized_deltas = normalized_deltas.cpu().numpy()
 
-        q01 = self.stats[robot_type]["delta_actions"]["q01"]
-        q99 = self.stats[robot_type]["delta_actions"]["q99"]
+        if self.symmetric_delta_norm:
+            # Symmetric denormalization: multiply by scale
+            scale = self.stats[robot_type]["delta_actions"]["symmetric_scale"]
+            denormalized = normalized_deltas * scale
+        else:
+            # Legacy asymmetric denormalization
+            q01 = self.stats[robot_type]["delta_actions"]["q01"]
+            q99 = self.stats[robot_type]["delta_actions"]["q99"]
+            # Reverse normalization
+            denormalized = (normalized_deltas + 1.0) / 2.0 * (q99 - q01) + q01
 
-        # Reverse normalization
-        denormalized = (normalized_deltas + 1.0) / 2.0 * (q99 - q01) + q01
         return denormalized
 
     def normalize_grippers(

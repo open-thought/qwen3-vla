@@ -2,7 +2,8 @@
 Compute idle frame masks for RoboTwin dataset.
 
 For each episode, identifies timesteps where the robot is idle (not moving).
-An idle frame is defined as one where max(abs(delta_actions)) < threshold.
+A frame is considered valid (non-idle) only if ALL timesteps in the action horizon
+have at least one joint with max(abs(delta)) >= threshold.
 
 The output is a JSON file mapping episode keys to lists of valid (non-idle) timesteps.
 This can be used by the dataloader to skip idle frames during training.
@@ -106,23 +107,26 @@ def compute_idle_masks(
             ep_valid_timesteps = []
 
             for t in range(num_timesteps - 1):  # Last timestep has no future
-                # Get available future timesteps
+                # Get available future timesteps (need +1 to compute consecutive deltas)
                 available = min(action_horizon, num_timesteps - t - 1)
-                future_states = full_state[t + 1:t + 1 + available]
-                current_state = full_state[t]
+                horizon_states = full_state[t:t + 1 + available]  # includes current state
 
-                # Compute delta actions
-                delta_actions = future_states - current_state
+                # Compute consecutive delta actions: state[i+1] - state[i]
+                delta_actions = horizon_states[1:] - horizon_states[:-1]
 
-                # Check if idle (max absolute delta below threshold)
-                max_delta = np.abs(delta_actions).max()
+                # Check if all timesteps have movement above threshold
+                # For each timestep, get max absolute delta across all joints
+                max_delta_per_timestep = np.abs(delta_actions).max(axis=1)
+
+                # Frame is valid only if ALL timesteps have change above threshold
+                all_active = np.all(max_delta_per_timestep >= idle_threshold)
 
                 total_frames += 1
-                if max_delta < idle_threshold:
-                    idle_frames += 1
-                else:
+                if all_active:
                     active_frames += 1
                     ep_valid_timesteps.append(t)
+                else:
+                    idle_frames += 1
 
             valid_timesteps[episode_key] = ep_valid_timesteps
 

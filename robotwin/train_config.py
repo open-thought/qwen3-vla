@@ -15,8 +15,10 @@ class TrainingConfig:
     # Model configuration
     model_name: str = "Qwen/Qwen3-VL-2B-Instruct"
     original_vocab_size: int = 151936
-    new_vocab_size: int = 153984  # 151936 + 2048 FAST tokens (or 151936 + 256 for bin tokenizer)
-    tokenizer_type: str = "fast"  # "fast" (compressed FAST tokenizer) or "bin" (OpenVLA-style 256 bins)
+    new_vocab_size: int = 153984  # 151936 + 2048 FAST tokens (or 151936 + n_bins for bin tokenizer)
+    tokenizer_type: str = "fast"  # "fast" (compressed FAST tokenizer) or "bin" (OpenVLA-style bins)
+    n_bins: int = 256  # Number of bins for BinTokenizer (use 257 for exact zero reconstruction)
+    symmetric_delta_norm: bool = False  # Use symmetric normalization for deltas (0 maps to exactly 0)
 
     # Dataset configuration
     dataset_root: str = "/mnt/robotwin/dataset"
@@ -96,9 +98,13 @@ class TrainingConfig:
         # Auto-adjust vocab size if using default value (153984 = FAST default)
         if self.new_vocab_size == 153984:
             if self.tokenizer_type == "bin":
-                self.new_vocab_size = self.original_vocab_size + 256
-                print(f"Using BinTokenizer: adjusted new_vocab_size to {self.new_vocab_size}")
+                self.new_vocab_size = self.original_vocab_size + self.n_bins
+                print(f"Using BinTokenizer with {self.n_bins} bins: adjusted new_vocab_size to {self.new_vocab_size}")
             # else: keep default 153984 for FAST
+
+        # Validate n_bins
+        if self.tokenizer_type == "bin" and self.n_bins <= 0:
+            raise ValueError(f"n_bins must be positive, got {self.n_bins}")
 
         # Validate action horizon
         if self.action_horizon <= 0:

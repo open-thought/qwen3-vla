@@ -60,6 +60,8 @@ def create_dataloaders(config: TrainingConfig):
         random_order=config.random_order,
         pad_action_horizon=config.pad_action_horizon,
         tokenizer_type=config.tokenizer_type,
+        n_bins=config.n_bins,
+        symmetric_delta_norm=config.symmetric_delta_norm,
     )
 
     # Split into train/val
@@ -93,6 +95,8 @@ def create_dataloaders(config: TrainingConfig):
         random_order=config.random_order,
         pad_action_horizon=config.pad_action_horizon,
         tokenizer_type=config.tokenizer_type,
+        n_bins=config.n_bins,
+        symmetric_delta_norm=config.symmetric_delta_norm,
     )
 
     # Use same indices for validation
@@ -101,7 +105,11 @@ def create_dataloaders(config: TrainingConfig):
     # Create processor and collator
     from transformers import AutoProcessor
     processor = AutoProcessor.from_pretrained(config.model_name, trust_remote_code=True)
-    collator = VLADataCollator(processor=processor, tokenizer_type=config.tokenizer_type)
+    collator = VLADataCollator(
+        processor=processor,
+        tokenizer_type=config.tokenizer_type,
+        n_bins=config.n_bins,
+    )
 
     # Create dataloaders
     train_loader = DataLoader(

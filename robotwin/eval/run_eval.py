@@ -308,7 +308,7 @@ def run_evaluation(
             # Note: policy_eval executes `execute_steps` actions internally
             # For accurate video recording with execute_steps > 1, we record after each action
             instruction = TASK_ENV.get_instruction()
-            actions = model.get_action(observation, instruction)
+            actions = model.get_action(observation, instruction, execute_steps=execute_steps)
 
             steps_to_execute = min(execute_steps, len(actions))
             for i in range(steps_to_execute):
