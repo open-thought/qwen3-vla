@@ -62,6 +62,9 @@ def create_dataloaders(config: TrainingConfig):
         tokenizer_type=config.tokenizer_type,
         n_bins=config.n_bins,
         symmetric_delta_norm=config.symmetric_delta_norm,
+        binarize_grippers=config.binarize_grippers,
+        gripper_open_threshold=config.gripper_open_threshold,
+        gripper_closed_threshold=config.gripper_closed_threshold,
     )
 
     # Split into train/val
@@ -97,6 +100,9 @@ def create_dataloaders(config: TrainingConfig):
         tokenizer_type=config.tokenizer_type,
         n_bins=config.n_bins,
         symmetric_delta_norm=config.symmetric_delta_norm,
+        binarize_grippers=config.binarize_grippers,
+        gripper_open_threshold=config.gripper_open_threshold,
+        gripper_closed_threshold=config.gripper_closed_threshold,
     )
 
     # Use same indices for validation

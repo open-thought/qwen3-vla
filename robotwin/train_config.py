@@ -20,6 +20,11 @@ class TrainingConfig:
     n_bins: int = 256  # Number of bins for BinTokenizer (use 257 for exact zero reconstruction)
     symmetric_delta_norm: bool = False  # Use symmetric normalization for deltas (0 maps to exactly 0)
 
+    # Gripper binarization (converts continuous gripper values to binary 0/1)
+    binarize_grippers: bool = False  # If True, binarize gripper values during training
+    gripper_open_threshold: float = 0.95  # Values > this are considered open (1.0)
+    gripper_closed_threshold: float = 0.05  # Values < this are considered closed (0.0)
+
     # Dataset configuration
     dataset_root: str = "/mnt/robotwin/dataset"
     norm_stats_path: str = "data/robotwin_norm_stats.json"

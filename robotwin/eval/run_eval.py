@@ -135,6 +135,7 @@ def run_evaluation(
     seed: int = 42,
     execute_steps: int = 1,
     use_builtin_video: bool = False,
+    max_steps: int = None,
 ):
     """
     Run evaluation on a single task.
@@ -151,6 +152,7 @@ def run_evaluation(
         execute_steps: Number of action steps to execute before re-predicting
         use_builtin_video: Use RoboTwin's built-in video recording (head camera only,
                            records every simulation step inside take_action)
+        max_steps: Maximum simulation steps per episode (overrides task-specific limit)
 
     Returns:
         Dictionary with evaluation results
@@ -200,11 +202,14 @@ def run_evaluation(
         # Set in config so TASK_ENV knows about it
         config["eval_video_save_dir"] = str(builtin_video_dir)
 
-    # Load step limit
-    step_limit_path = ROBOTWIN_DIR / "task_config" / "_eval_step_limit.yml"
-    with open(step_limit_path, "r") as f:
-        step_limits = yaml.safe_load(f)
-    step_limit = step_limits.get(task_name, 1000)
+    # Load step limit (use max_steps override if provided)
+    if max_steps is not None:
+        step_limit = max_steps
+    else:
+        step_limit_path = ROBOTWIN_DIR / "task_config" / "_eval_step_limit.yml"
+        with open(step_limit_path, "r") as f:
+            step_limits = yaml.safe_load(f)
+        step_limit = step_limits.get(task_name, 1000)
 
     # Evaluation loop
     st_seed = 100000 * (1 + seed)
@@ -424,7 +429,9 @@ def main():
         "--task_config",
         type=str,
         default="demo_clean",
-        help="Task configuration name"
+        choices=["demo_clean", "demo_randomized"],
+        help="Task configuration name: 'demo_clean' (white table, no distractors) or "
+             "'demo_randomized' (random backgrounds, textures, lighting, table clutter)"
     )
     parser.add_argument(
         "--instruction_type",
@@ -494,9 +501,26 @@ def main():
         help="Number of action steps to execute before re-predicting (1=closed-loop, action_horizon=open-loop)"
     )
     parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=None,
+        help="Maximum simulation steps per episode (overrides task-specific limit from _eval_step_limit.yml)"
+    )
+    parser.add_argument(
         "--debug_actions",
         action="store_true",
         help="Print decoded action values for debugging"
+    )
+    parser.add_argument(
+        "--binarize_gripper",
+        action="store_true",
+        help="Binarize gripper actions to 0 (closed) or 1 (open) using threshold"
+    )
+    parser.add_argument(
+        "--gripper_threshold",
+        type=float,
+        default=0.5,
+        help="Threshold for gripper binarization (default: 0.5)"
     )
     parser.add_argument(
         "--temperature",
@@ -522,6 +546,17 @@ def main():
         default="fast",
         choices=["fast", "bin"],
         help="Action tokenizer type: 'fast' (compressed) or 'bin' (OpenVLA-style 256 bins)"
+    )
+    parser.add_argument(
+        "--n_bins",
+        type=int,
+        default=256,
+        help="Number of bins for BinTokenizer (default: 256, use 257 for exact zero)"
+    )
+    parser.add_argument(
+        "--symmetric_delta_norm",
+        action="store_true",
+        help="Use symmetric normalization for delta actions (0 maps to 0)"
     )
 
     args = parser.parse_args()
@@ -550,6 +585,10 @@ def main():
         "temperature": args.temperature,
         "top_p": args.top_p,
         "tokenizer_type": args.tokenizer_type,
+        "n_bins": args.n_bins,
+        "symmetric_delta_norm": args.symmetric_delta_norm,
+        "binarize_gripper": args.binarize_gripper,
+        "gripper_threshold": args.gripper_threshold,
     }
     model = get_model(model_args)
 
@@ -567,6 +606,7 @@ def main():
             seed=args.seed,
             execute_steps=args.execute_steps,
             use_builtin_video=args.builtin_video,
+            max_steps=args.max_steps,
         )
         all_results[task_name] = results
 

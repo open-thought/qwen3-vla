@@ -24,6 +24,7 @@ torch.backends.cuda.enable_flash_sdp(True)
 
 from action_tokenizer import create_action_tokenizer
 from normalization import MultiRobotNormalizer, discretize_normalized_values
+from prompt_formatter import PromptFormatter
 
 
 class Qwen3VLAPolicy:
@@ -59,6 +60,8 @@ class Qwen3VLAPolicy:
         n_bins: int = 256,  # Number of bins for BinTokenizer (use 257 for exact zero)
         symmetric_delta_norm: bool = False,  # Use symmetric normalization (0 maps to 0)
         execute_steps: int = None,  # Default execute steps (None = full action_horizon)
+        binarize_gripper: bool = False,  # Binarize gripper actions to 0 or 1
+        gripper_threshold: float = 0.5,  # Threshold for gripper binarization
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -79,6 +82,8 @@ class Qwen3VLAPolicy:
             symmetric_delta_norm: Use symmetric normalization for delta actions (0 maps to 0)
             execute_steps: Default number of steps to decode/execute. If None, uses full action_horizon.
                           For BinTokenizer, this limits tokens to execute_steps * action_dim.
+            binarize_gripper: If True, binarize gripper actions to 0 (closed) or 1 (open)
+            gripper_threshold: Threshold for binarization (default 0.5). Values >= threshold become 1, else 0.
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -93,6 +98,8 @@ class Qwen3VLAPolicy:
         self.n_bins = n_bins
         self.symmetric_delta_norm = symmetric_delta_norm
         self.default_execute_steps = execute_steps
+        self.binarize_gripper = binarize_gripper
+        self.gripper_threshold = gripper_threshold
 
         # Timing statistics
         self.total_generate_time = 0.0
@@ -126,6 +133,9 @@ class Qwen3VLAPolicy:
         # Load normalizer
         print(f"Loading normalization stats from {norm_stats_path}...")
         self.normalizer = MultiRobotNormalizer(norm_stats_path, symmetric_delta_norm=symmetric_delta_norm)
+
+        # Unified prompt formatter (ensures consistency with training)
+        self.prompt_formatter = PromptFormatter()
 
         # Get robot metadata
         metadata = self.normalizer.get_robot_metadata(robot_type)
@@ -225,29 +235,27 @@ class Qwen3VLAPolicy:
             joint_action["right_gripper"]
         ])
 
-    def _build_prompt(
+    def _build_prompt_text(
         self,
         instruction: str,
         discretized_state: np.ndarray,
-    ) -> list:
+    ) -> str:
         """
-        Build the conversation prompt for the model.
+        Build the prompt text for the model.
 
         Args:
             instruction: Task instruction text
             discretized_state: State discretized to [0, 255]
 
         Returns:
-            Conversation list for processor
+            Prompt text string
         """
-        # Format state as comma-separated integers
-        state_str = ", ".join([str(int(s)) for s in discretized_state])
-
-        prompt_text = f"""Task: {instruction}
-Robot: {self.robot_type}
-State: [{state_str}]"""
-
-        return prompt_text
+        # Use unified prompt formatter (ensures consistency with training)
+        return self.prompt_formatter.build_prompt_text(
+            task_description=instruction,
+            robot_type=self.robot_type,
+            discretized_state=discretized_state,
+        )
 
     def get_action(
         self,
@@ -301,24 +309,15 @@ State: [{state_str}]"""
         # Discretize to [0, 255] for prompt
         discretized_state = discretize_normalized_values(normalized_state_with_grippers, num_bins=256)
 
-        # Build prompt text
-        prompt_text = self._build_prompt(instruction, discretized_state)
-
-        # Build conversation with images
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Left camera:"},
-                    {"type": "image", "image": images[0]},
-                    {"type": "text", "text": "Right camera:"},
-                    {"type": "image", "image": images[1]},
-                    {"type": "text", "text": "Head camera:"},
-                    {"type": "image", "image": images[2]},
-                    {"type": "text", "text": prompt_text},
-                ],
-            }
-        ]
+        # Build conversation using unified prompt formatter (ensures consistency with training)
+        conversation = self.prompt_formatter.build_conversation(
+            left_camera=images[0],
+            right_camera=images[1],
+            head_camera=images[2],
+            task_description=instruction,
+            robot_type=self.robot_type,
+            discretized_state=discretized_state,
+        )
 
         # Process inputs
         inputs = self.processor.apply_chat_template(
@@ -327,6 +326,8 @@ State: [{state_str}]"""
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
+            padding=True,
+            padding_side="left",
         )
 
         # Move to device
@@ -388,9 +389,29 @@ State: [{state_str}]"""
                 action_tokens = action_tokens[:max_tokens_needed]
 
         if self.debug_actions:
-            # Print state info to verify it's changing between calls
-            print(f"    State (first 6): [{', '.join(f'{x:.4f}' for x in state[:6])}]")
-            print(f"    Discretized (first 6): [{', '.join(str(int(x)) for x in discretized_state[:6])}]")
+            # Print full state info split by component (state = joints only, grippers separate)
+            left_arm = state[:self.dof]
+            right_arm = state[self.dof:]
+            left_grip = grippers[0]
+            right_grip = grippers[1]
+
+            # Discretized state includes grippers at the end
+            disc_left_arm = discretized_state[:self.dof]
+            disc_right_arm = discretized_state[self.dof:2*self.dof]
+            disc_left_grip = discretized_state[2*self.dof]
+            disc_right_grip = discretized_state[2*self.dof + 1]
+
+            print(f"    State (raw):")
+            print(f"      Left arm:     [{', '.join(f'{x:7.4f}' for x in left_arm)}]")
+            print(f"      Left gripper:  {left_grip:.4f}")
+            print(f"      Right arm:    [{', '.join(f'{x:7.4f}' for x in right_arm)}]")
+            print(f"      Right gripper: {right_grip:.4f}")
+            print(f"    State (discretized 0-255):")
+            print(f"      Left arm:     [{', '.join(f'{int(x):3d}' for x in disc_left_arm)}]")
+            print(f"      Left gripper:  {int(disc_left_grip):3d}")
+            print(f"      Right arm:    [{', '.join(f'{int(x):3d}' for x in disc_right_arm)}]")
+            print(f"      Right gripper: {int(disc_right_grip):3d}")
+
             tokens_no_offset = [t - self.action_token_start for t in action_tokens]
             if self.tokenizer_type == "bin":
                 print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}, decode_steps={decode_steps}): {tokens_no_offset[:28]}{'...' if len(tokens_no_offset) > 28 else ''}")
@@ -398,6 +419,7 @@ State: [{state_str}]"""
                 print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}): {tokens_no_offset}")
             if self.num_generate_calls <= 2:
                 # Print full prompt on first few calls
+                prompt_text = self.prompt_formatter.build_prompt_text(instruction, self.robot_type, discretized_state)
                 print(f"    Prompt: {prompt_text}")
 
         if len(action_tokens) == 0:
@@ -432,20 +454,36 @@ State: [{state_str}]"""
             normalized_joint_deltas,
             robot_type=self.robot_type,
         )
-        future_grippers = self.normalizer.denormalize_grippers(
+        future_grippers_raw = self.normalizer.denormalize_grippers(
             normalized_grippers,
             robot_type=self.robot_type,
         )
+
+        # Optionally binarize gripper actions to stabilize behavior
+        if self.binarize_gripper:
+            future_grippers = (future_grippers_raw >= self.gripper_threshold).astype(np.float32)
+        else:
+            future_grippers = future_grippers_raw
 
         # Convert delta joint actions to absolute qpos, with predicted grippers
         actions = self._delta_to_absolute(delta_joints, future_grippers)
 
         if self.debug_actions:
-            print(f"    Delta joints shape: {delta_joints.shape}, range: [{delta_joints.min():.4f}, {delta_joints.max():.4f}]")
-            print(f"    Future grippers shape: {future_grippers.shape}, range: [{future_grippers.min():.4f}, {future_grippers.max():.4f}]")
-            print(f"    Delta joints (decoded from model):")
-            for i, delta in enumerate(delta_joints):
-                print(f"      Delta[{i:2d}]: [{', '.join(f'{x:8.4f}' for x in delta)}]")
+            print(f"    Predicted action chunk (horizon={delta_joints.shape[0]}):")
+            print(f"      Delta joints range: [{delta_joints.min():.4f}, {delta_joints.max():.4f}]")
+            for i in range(delta_joints.shape[0]):
+                left_delta = delta_joints[i, :self.dof]
+                right_delta = delta_joints[i, self.dof:]
+                left_raw = future_grippers_raw[i, 0]
+                right_raw = future_grippers_raw[i, 1]
+                left_grip = future_grippers[i, 0]
+                right_grip = future_grippers[i, 1]
+                if self.binarize_gripper:
+                    print(f"      [{i:2d}] L_arm: [{', '.join(f'{x:7.4f}' for x in left_delta)}] L_grip: {left_raw:.3f}->{left_grip:.0f}")
+                    print(f"           R_arm: [{', '.join(f'{x:7.4f}' for x in right_delta)}] R_grip: {right_raw:.3f}->{right_grip:.0f}")
+                else:
+                    print(f"      [{i:2d}] L_arm: [{', '.join(f'{x:7.4f}' for x in left_delta)}] L_grip: {left_grip:.4f}")
+                    print(f"           R_arm: [{', '.join(f'{x:7.4f}' for x in right_delta)}] R_grip: {right_grip:.4f}")
 
         self.step_count += 1
 
@@ -555,6 +593,8 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     n_bins = usr_args.get("n_bins", 256)
     symmetric_delta_norm = usr_args.get("symmetric_delta_norm", False)
     execute_steps = usr_args.get("execute_steps", None)
+    binarize_gripper = usr_args.get("binarize_gripper", False)
+    gripper_threshold = usr_args.get("gripper_threshold", 0.5)
 
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
@@ -569,6 +609,8 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         n_bins=n_bins,
         symmetric_delta_norm=symmetric_delta_norm,
         execute_steps=execute_steps,
+        binarize_gripper=binarize_gripper,
+        gripper_threshold=gripper_threshold,
     )
 
     return _policy_instance

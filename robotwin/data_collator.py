@@ -8,6 +8,8 @@ and action token targets.
 import torch
 from typing import Dict, List
 
+from prompt_formatter import PromptFormatter
+
 
 class VLADataCollator:
     """
@@ -56,6 +58,9 @@ class VLADataCollator:
         # Use <|im_end|> as EOT token (ID 151645 in Qwen3)
         self.eot_token_id = processor.tokenizer.eos_token_id
 
+        # Unified prompt formatter (ensures consistency with eval)
+        self.prompt_formatter = PromptFormatter()
+
     def __call__(self, samples: List[Dict]) -> Dict[str, torch.Tensor]:
         """
         Collate a batch of samples.
@@ -74,29 +79,16 @@ class VLADataCollator:
         action_token_sequences = []
 
         for sample in samples:
-            # Build text prompt
-            state_str = ", ".join([str(int(s)) for s in sample["discretized_state"]])
-
-            prompt_text = f"""Task: {sample['task_description']}
-Robot: {sample['robot_type']}
-State: [{state_str}]"""
-
-            # Prepare conversation with 3 images
-            # Images are already tensors in (C, H, W) format with values in [0, 1]
-            conversation = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Left camera:"},
-                        {"type": "image", "image": sample["left_camera"]},
-                        {"type": "text", "text": "Right camera:"},
-                        {"type": "image", "image": sample["right_camera"]},
-                        {"type": "text", "text": "Head camera:"},
-                        {"type": "image", "image": sample["head_camera"]},
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }
-            ]
+            # Build conversation using unified prompt formatter
+            # This ensures consistency with eval (qwen3_vla_policy.py)
+            conversation = self.prompt_formatter.build_conversation(
+                left_camera=sample["left_camera"],
+                right_camera=sample["right_camera"],
+                head_camera=sample["head_camera"],
+                task_description=sample["task_description"],
+                robot_type=sample["robot_type"],
+                discretized_state=sample["discretized_state"],
+            )
 
             prompts.append(conversation)
             action_token_sequences.append(sample["action_tokens"])

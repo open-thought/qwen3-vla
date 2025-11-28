@@ -50,14 +50,26 @@ class MultiRobotNormalizer:
                     self.stats[robot_type][category]["q99"]
                 )
 
+                # Verify normalization range is valid (q99 - q01 > 0)
+                q01 = self.stats[robot_type][category]["q01"]
+                q99 = self.stats[robot_type][category]["q99"]
+                denom = q99 - q01
+                assert np.all(denom > 1e-8), (
+                    f"Invalid normalization range for {robot_type}/{category}: "
+                    f"q99 - q01 must be > 1e-8, got min={denom.min()}"
+                )
+
             # Pre-compute symmetric scale for delta actions if needed
             if symmetric_delta_norm:
                 q01 = self.stats[robot_type]["delta_actions"]["q01"]
                 q99 = self.stats[robot_type]["delta_actions"]["q99"]
                 # Use max of absolute values so 0 maps to exactly 0
-                self.stats[robot_type]["delta_actions"]["symmetric_scale"] = np.maximum(
-                    np.abs(q01), np.abs(q99)
+                symmetric_scale = np.maximum(np.abs(q01), np.abs(q99))
+                assert np.all(symmetric_scale > 1e-8), (
+                    f"Invalid symmetric scale for {robot_type}/delta_actions: "
+                    f"scale must be > 1e-8, got min={symmetric_scale.min()}"
                 )
+                self.stats[robot_type]["delta_actions"]["symmetric_scale"] = symmetric_scale
 
     def normalize_state(
         self,
@@ -82,7 +94,7 @@ class MultiRobotNormalizer:
         # Normalize to [-1, 1]
         # (value - q01) / (q99 - q01) maps [q01, q99] to [0, 1]
         # Then * 2 - 1 maps [0, 1] to [-1, 1]
-        normalized = 2.0 * (state - q01) / (q99 - q01 + 1e-8) - 1.0
+        normalized = 2.0 * (state - q01) / (q99 - q01) - 1.0
 
         if return_torch:
             return torch.from_numpy(normalized).float()
@@ -133,7 +145,7 @@ class MultiRobotNormalizer:
         if self.symmetric_delta_norm:
             # Symmetric normalization: 0 maps to exactly 0
             scale = self.stats[robot_type]["delta_actions"]["symmetric_scale"]
-            normalized = delta_actions / (scale + 1e-8)
+            normalized = delta_actions / scale
             # Clip to [-1, 1] for values outside the expected range
             normalized = np.clip(normalized, -1.0, 1.0)
         else:
@@ -141,7 +153,7 @@ class MultiRobotNormalizer:
             q01 = self.stats[robot_type]["delta_actions"]["q01"]
             q99 = self.stats[robot_type]["delta_actions"]["q99"]
             # Normalize to [-1, 1]
-            normalized = 2.0 * (delta_actions - q01) / (q99 - q01 + 1e-8) - 1.0
+            normalized = 2.0 * (delta_actions - q01) / (q99 - q01) - 1.0
 
         if return_torch:
             return torch.from_numpy(normalized).float()
@@ -199,7 +211,7 @@ class MultiRobotNormalizer:
         q99 = self.stats[robot_type]["grippers"]["q99"]
 
         # Normalize to [-1, 1]
-        normalized = 2.0 * (grippers - q01) / (q99 - q01 + 1e-8) - 1.0
+        normalized = 2.0 * (grippers - q01) / (q99 - q01) - 1.0
 
         if return_torch:
             return torch.from_numpy(normalized).float()

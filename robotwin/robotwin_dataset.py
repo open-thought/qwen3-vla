@@ -85,6 +85,9 @@ class RoboTwinVLADataset(Dataset):
         tokenizer_type: str = "fast",
         n_bins: int = 256,
         symmetric_delta_norm: bool = False,
+        binarize_grippers: bool = False,
+        gripper_open_threshold: float = 0.95,
+        gripper_closed_threshold: float = 0.05,
     ):
         """
         Args:
@@ -108,6 +111,10 @@ class RoboTwinVLADataset(Dataset):
             tokenizer_type: Type of action tokenizer to use ("fast" or "bin")
             n_bins: Number of bins for BinTokenizer (default: 256). Use 257 for exact zero.
             symmetric_delta_norm: Use symmetric normalization for delta actions (0 maps to 0).
+            binarize_grippers: If True, convert continuous gripper values to binary (0=closed, 1=open)
+                using forward-looking relabeling for intermediate values. Default False.
+            gripper_open_threshold: Gripper values > this are considered open (default 0.95).
+            gripper_closed_threshold: Gripper values < this are considered closed (default 0.05).
         """
         self.dataset_root = Path(dataset_root)
         self.action_horizon = action_horizon
@@ -224,8 +231,18 @@ class RoboTwinVLADataset(Dataset):
         self.tokenizer_type = tokenizer_type
         self.symmetric_delta_norm = symmetric_delta_norm
 
+        # Gripper binarization settings
+        self.binarize_grippers = binarize_grippers
+        self.gripper_open_threshold = gripper_open_threshold
+        self.gripper_closed_threshold = gripper_closed_threshold
+
         # Zip file cache
         self.zip_cache = ZipFileCache(max_open=cache_size)
+
+        if binarize_grippers:
+            print(f"\nGripper binarization enabled:")
+            print(f"  Open threshold: > {gripper_open_threshold}")
+            print(f"  Closed threshold: < {gripper_closed_threshold}")
 
         print(f"\nDataset ready!")
         print(f"  Episodes: {len(self.index.episodes)}")
@@ -282,10 +299,8 @@ class RoboTwinVLADataset(Dataset):
         instruction_bytes = zf.read(instruction_path)
         instruction_data = json.loads(instruction_bytes.decode("utf-8"))
 
-        # Sample random instruction variation
-        instruction = random.choice(
-            instruction_data["seen"] + instruction_data["unseen"]
-        )
+        # Sample random instruction variation (only from "seen" set for training)
+        instruction = random.choice(instruction_data["seen"])
 
         # Extract data
         data = {
@@ -307,6 +322,55 @@ class RoboTwinVLADataset(Dataset):
 
         return data
 
+    def _binarize_gripper_sequence(self, gripper_sequence: np.ndarray) -> np.ndarray:
+        """
+        Binarize a gripper value sequence using forward-looking relabeling.
+
+        Following the OpenVLA-OFT approach:
+        - Values > gripper_open_threshold → 1.0 (open)
+        - Values < gripper_closed_threshold → 0.0 (closed)
+        - Intermediate values are relabeled based on the trajectory's eventual state
+
+        For intermediate values, we look forward to find where the trajectory ends up.
+        This handles the case where gripper is at 0.5 during a close operation.
+
+        Args:
+            gripper_sequence: Shape (T,) gripper values for one gripper over time
+
+        Returns:
+            Binarized gripper sequence with values in {0.0, 1.0}
+        """
+        result = np.zeros_like(gripper_sequence)
+        T = len(gripper_sequence)
+
+        for t in range(T):
+            value = gripper_sequence[t]
+
+            if value > self.gripper_open_threshold:
+                result[t] = 1.0
+            elif value < self.gripper_closed_threshold:
+                result[t] = 0.0
+            else:
+                # Intermediate value: look forward to find eventual state
+                # Find the next non-intermediate value
+                eventual_state = None
+                for future_t in range(t + 1, T):
+                    future_val = gripper_sequence[future_t]
+                    if future_val > self.gripper_open_threshold:
+                        eventual_state = 1.0
+                        break
+                    elif future_val < self.gripper_closed_threshold:
+                        eventual_state = 0.0
+                        break
+
+                if eventual_state is not None:
+                    result[t] = eventual_state
+                else:
+                    # No clear eventual state found, use threshold on current value
+                    result[t] = 1.0 if value > 0.5 else 0.0
+
+        return result
+
     def _extract_sample(
         self,
         episode_data: dict,
@@ -324,6 +388,13 @@ class RoboTwinVLADataset(Dataset):
         # Get gripper states for all timesteps
         left_gripper = episode_data["left_gripper"]  # (T,)
         right_gripper = episode_data["right_gripper"]  # (T,)
+
+        # Apply gripper binarization if enabled (before stacking)
+        # Binarization is done on the full episode to enable forward-looking relabeling
+        if self.binarize_grippers:
+            left_gripper = self._binarize_gripper_sequence(left_gripper)
+            right_gripper = self._binarize_gripper_sequence(right_gripper)
+
         full_grippers = np.stack([left_gripper, right_gripper], axis=1)  # (T, 2)
 
         num_timesteps = len(full_joints)
