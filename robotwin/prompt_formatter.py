@@ -37,23 +37,32 @@ class PromptFormatter:
         """
         self.num_state_bins = num_state_bins
 
-    def format_state(self, discretized_state: np.ndarray) -> str:
+    def format_state(self, discretized_state: np.ndarray, dropout_mask: Optional[np.ndarray] = None) -> str:
         """
         Format discretized state as a comma-separated string.
 
         Args:
             discretized_state: State array with values in [0, num_state_bins-1]
+            dropout_mask: Optional boolean mask where True means "drop out this value"
+                         Dropped values are replaced with "?" in the output
 
         Returns:
-            Formatted string like "128, 64, 200, ..."
+            Formatted string like "128, 64, 200, ..." or "?, 64, ?, ..." with dropout
         """
-        return ", ".join([str(int(s)) for s in discretized_state])
+        if dropout_mask is None:
+            return ", ".join([str(int(s)) for s in discretized_state])
+        else:
+            return ", ".join([
+                "?" if dropout_mask[i] else str(int(s))
+                for i, s in enumerate(discretized_state)
+            ])
 
     def build_prompt_text(
         self,
         task_description: str,
         robot_type: str,
         discretized_state: np.ndarray,
+        state_dropout_mask: Optional[np.ndarray] = None,
     ) -> str:
         """
         Build the text portion of the prompt.
@@ -62,11 +71,12 @@ class PromptFormatter:
             task_description: Natural language task instruction
             robot_type: Robot type identifier (e.g., "aloha-agilex")
             discretized_state: State array with values in [0, num_state_bins-1]
+            state_dropout_mask: Optional boolean mask for state dropout
 
         Returns:
             Formatted prompt text
         """
-        state_str = self.format_state(discretized_state)
+        state_str = self.format_state(discretized_state, state_dropout_mask)
 
         prompt_text = f"""Task: {task_description}
 Robot: {robot_type}
@@ -82,6 +92,7 @@ State: [{state_str}]"""
         task_description: str,
         robot_type: str,
         discretized_state: np.ndarray,
+        state_dropout_mask: Optional[np.ndarray] = None,
     ) -> list:
         """
         Build the full conversation structure for the model.
@@ -96,6 +107,7 @@ State: [{state_str}]"""
             task_description: Natural language task instruction
             robot_type: Robot type identifier
             discretized_state: State array with values in [0, num_state_bins-1]
+            state_dropout_mask: Optional boolean mask for state dropout
 
         Returns:
             Conversation list for processor.apply_chat_template()
@@ -104,6 +116,7 @@ State: [{state_str}]"""
             task_description=task_description,
             robot_type=robot_type,
             discretized_state=discretized_state,
+            state_dropout_mask=state_dropout_mask,
         )
 
         conversation = [

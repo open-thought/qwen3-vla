@@ -2,9 +2,10 @@
 # Full RoboTwin dataset - all robots, all variants, action_horizon=8
 # Using BinTokenizer with 257 bins and symmetric delta normalization
 # This ensures exact zero reconstruction for idle frames
+# Base model: Qwen3-VL-4B-Instruct
 
 # Model configuration
-model_name: Qwen/Qwen3-VL-2B-Instruct
+model_name: Qwen/Qwen3-VL-4B-Instruct
 original_vocab_size: 151936
 new_vocab_size: 152193  # 151936 + 257 (BinTokenizer with 257 bins)
 tokenizer_type: bin  # "fast" or "bin"
@@ -13,9 +14,9 @@ symmetric_delta_norm: true  # Use symmetric normalization (0 maps to exactly 0)
 
 # Gripper binarization (converts continuous gripper values to binary 0/1)
 # Uses forward-looking relabeling for intermediate values
-binarize_grippers: false  # Set to true to enable gripper binarization
+binarize_grippers: true
 gripper_open_threshold: 0.95  # Values > this are considered open (1.0)
-gripper_closed_threshold: 0.05  # Values < this are considered closed (0.0)
+gripper_closed_threshold: 0.3  # Values < this are considered closed (0.0)
 
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
@@ -40,22 +41,12 @@ max_num_transforms: 3
 random_order: false
 val_use_augmentation: false
 
-# State dropout (to prevent shortcut learning via state)
-# Forces model to rely on images by masking state values with "?"
-state_dropout_prob: 0.5  # 50% chance each state value is replaced with "?"
-state_dropout_full_prob: 0.25  # 25% chance ALL state values are masked
-
-# State reconstruction auxiliary task
-# When state is dropped, model must reconstruct full state from images
-state_reconstruction: true
-state_reconstruction_only_on_dropout: true  # Only add reconstruction when state was dropped
-
 # Training split
 validation_split: 0.05
 
 # Training hyperparameters
-batch_size: 7  # Can use larger batch with shorter action horizon
-gradient_accumulation_steps: 4
+batch_size: 2
+gradient_accumulation_steps: 2
 learning_rate: 2.0e-05
 weight_decay: 0.01
 max_grad_norm: 1.0
@@ -74,7 +65,7 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-full-h8-bin-sym
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-full-h8-bin-sym-4b
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100
@@ -87,7 +78,7 @@ prefetch_factor: 2
 enable_wandb: true
 wandb_project: qwen3-vla-robotwin
 wandb_entity: null
-wandb_run_name: aloha-h8-bin-sym-state-dropout
+wandb_run_name: aloha-dataset-h8-bin-symmetric-4b
 wandb_log_interval: 50
 
 # Mixed precision training (always uses bfloat16)

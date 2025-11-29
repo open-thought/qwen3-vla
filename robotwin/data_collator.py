@@ -33,6 +33,8 @@ class VLADataCollator:
         add_eot_token: bool = True,        # Add EOT token after action sequence
         tokenizer_type: str = "fast",      # "fast" or "bin"
         n_bins: int = 256,                 # Number of bins for BinTokenizer
+        state_reconstruction: bool = False,  # Enable state reconstruction auxiliary task
+        state_reconstruction_only_on_dropout: bool = True,  # Only add reconstruction when state was dropped
     ):
         """
         Args:
@@ -42,10 +44,16 @@ class VLADataCollator:
             add_eot_token: Whether to append EOT token after action sequence
             tokenizer_type: Type of action tokenizer ("fast" or "bin")
             n_bins: Number of bins for BinTokenizer (default: 256, use 257 for exact zero)
+            state_reconstruction: Enable state reconstruction auxiliary task. When True,
+                appends tokenized state after actions: [actions] -> [EOT] -> [state] -> [EOT]
+            state_reconstruction_only_on_dropout: Only add state reconstruction when
+                state dropout was applied to this sample (default True)
         """
         self.processor = processor
         self.tokenizer_type = tokenizer_type
         self.n_bins = n_bins
+        self.state_reconstruction = state_reconstruction
+        self.state_reconstruction_only_on_dropout = state_reconstruction_only_on_dropout
 
         # Set token range based on tokenizer type if using defaults
         if tokenizer_type == "bin" and action_token_end == 153983:
@@ -60,6 +68,27 @@ class VLADataCollator:
 
         # Unified prompt formatter (ensures consistency with eval)
         self.prompt_formatter = PromptFormatter()
+
+    def _tokenize_state_for_reconstruction(self, discretized_state) -> torch.Tensor:
+        """
+        Tokenize discretized state values for reconstruction task.
+
+        Converts state to text like "State: [128, 64, 200, ...]" and tokenizes it.
+        This allows the model to predict the full state from images.
+
+        Args:
+            discretized_state: Array of discretized state values [0-255]
+
+        Returns:
+            Tensor of token IDs for the state reconstruction target
+        """
+        # Format state as text (same format as in prompt, but without masking)
+        state_str = ", ".join([str(int(s)) for s in discretized_state])
+        state_text = f"State: [{state_str}]"
+
+        # Tokenize (without special tokens - we'll add EOT separately)
+        tokens = self.processor.tokenizer.encode(state_text, add_special_tokens=False)
+        return torch.tensor(tokens, dtype=torch.long)
 
     def __call__(self, samples: List[Dict]) -> Dict[str, torch.Tensor]:
         """
@@ -88,6 +117,7 @@ class VLADataCollator:
                 task_description=sample["task_description"],
                 robot_type=sample["robot_type"],
                 discretized_state=sample["discretized_state"],
+                state_dropout_mask=sample.get("state_dropout_mask"),  # May be None
             )
 
             prompts.append(conversation)
@@ -113,6 +143,9 @@ class VLADataCollator:
         attention_mask_list = []
         labels_list = []
 
+        # EOT token tensor (reused across samples)
+        eot_token = torch.tensor([self.eot_token_id], dtype=torch.long)
+
         for i in range(batch_size):
             # Get the prompt input_ids (without action tokens)
             prompt_ids = batch_inputs["input_ids"][i]
@@ -123,16 +156,41 @@ class VLADataCollator:
 
             # Optionally append EOT token after action sequence
             if self.add_eot_token:
-                eot_token = torch.tensor([self.eot_token_id], dtype=torch.long)
                 action_tokens = torch.cat([action_tokens, eot_token])
 
-            # Concatenate prompt + action tokens (+ EOT if enabled)
-            full_input_ids = torch.cat([prompt_ids, action_tokens])
-            full_attention_mask = torch.cat([prompt_mask, torch.ones_like(action_tokens)])
+            # Check if we should add state reconstruction for this sample
+            sample = samples[i]
+            has_dropout = sample.get("state_dropout_mask") is not None
+            add_state_recon = (
+                self.state_reconstruction and
+                (not self.state_reconstruction_only_on_dropout or has_dropout)
+            )
 
-            # Create labels: -100 for prompt (don't compute loss), actual tokens for actions (+ EOT)
-            prompt_labels = torch.full_like(prompt_ids, -100)
-            full_labels = torch.cat([prompt_labels, action_tokens])
+            if add_state_recon:
+                # Tokenize the full (uncorrupted) state for reconstruction
+                state_tokens = self._tokenize_state_for_reconstruction(sample["discretized_state"])
+                # Add EOT after state reconstruction
+                state_with_eot = torch.cat([state_tokens, eot_token])
+
+                # Full sequence: prompt + actions + EOT + state + EOT
+                full_input_ids = torch.cat([prompt_ids, action_tokens, state_with_eot])
+                full_attention_mask = torch.cat([
+                    prompt_mask,
+                    torch.ones_like(action_tokens),
+                    torch.ones_like(state_with_eot)
+                ])
+
+                # Labels: -100 for prompt, actual tokens for actions and state reconstruction
+                prompt_labels = torch.full_like(prompt_ids, -100)
+                full_labels = torch.cat([prompt_labels, action_tokens, state_with_eot])
+            else:
+                # Standard sequence: prompt + actions (+ EOT)
+                full_input_ids = torch.cat([prompt_ids, action_tokens])
+                full_attention_mask = torch.cat([prompt_mask, torch.ones_like(action_tokens)])
+
+                # Create labels: -100 for prompt (don't compute loss), actual tokens for actions (+ EOT)
+                prompt_labels = torch.full_like(prompt_ids, -100)
+                full_labels = torch.cat([prompt_labels, action_tokens])
 
             input_ids_list.append(full_input_ids)
             attention_mask_list.append(full_attention_mask)

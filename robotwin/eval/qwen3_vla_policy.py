@@ -116,6 +116,7 @@ class Qwen3VLAPolicy:
             trust_remote_code=True,
         )
         self.model.eval()
+        print("model type", type(self.model))
 
         # Load processor from base model (checkpoint tokenizer files may be incomplete)
         # Use the base Qwen3-VL-2B-Instruct processor
@@ -189,14 +190,11 @@ class Qwen3VLAPolicy:
 
         for cam_name in ["left_camera", "right_camera", "head_camera"]:
             rgb = observation["observation"][cam_name]["rgb"]
+            assert rgb.dtype == np.uint8 and rgb.shape[2] == 3
 
-            # Ensure uint8
-            if rgb.dtype != np.uint8:
-                rgb = (rgb * 255).clip(0, 255).astype(np.uint8)
-
-            # Convert to PIL
-            pil_img = Image.fromarray(rgb)
-            images.append(pil_img)
+            image_array = rgb.astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_array).permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+            images.append(image_tensor)
 
         return images
 
@@ -328,6 +326,7 @@ class Qwen3VLAPolicy:
             return_tensors="pt",
             padding=True,
             padding_side="left",
+            do_rescale=False,  # Pixel values are already in 0-1 range
         )
 
         # Move to device

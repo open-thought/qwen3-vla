@@ -39,6 +39,51 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def compute_gradient_norms(model) -> dict:
+    """
+    Compute gradient norms for vision encoder and language model parameters separately.
+
+    This helps diagnose if the vision encoder is receiving gradients during training.
+    If vision gradients are near zero while LM gradients are normal, the model may not
+    be learning from visual inputs.
+
+    Returns:
+        Dictionary with gradient norm statistics
+    """
+    vision_grad_sq = 0.0
+    lm_grad_sq = 0.0
+    embed_grad_sq = 0.0
+    vision_param_count = 0
+    lm_param_count = 0
+    embed_param_count = 0
+
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+
+        grad_norm_sq = param.grad.norm().item() ** 2
+
+        if "visual" in name:
+            vision_grad_sq += grad_norm_sq
+            vision_param_count += 1
+        elif "embed" in name or "lm_head" in name:
+            embed_grad_sq += grad_norm_sq
+            embed_param_count += 1
+        else:
+            lm_grad_sq += grad_norm_sq
+            lm_param_count += 1
+
+    return {
+        "grad_norm/vision": vision_grad_sq ** 0.5,
+        "grad_norm/lm": lm_grad_sq ** 0.5,
+        "grad_norm/embed": embed_grad_sq ** 0.5,
+        "grad_norm/total": (vision_grad_sq + lm_grad_sq + embed_grad_sq) ** 0.5,
+        "grad_params/vision": vision_param_count,
+        "grad_params/lm": lm_param_count,
+        "grad_params/embed": embed_param_count,
+    }
+
+
 def create_dataloaders(config: TrainingConfig):
     """Create training and validation dataloaders."""
     print("\nCreating datasets...")
@@ -65,6 +110,8 @@ def create_dataloaders(config: TrainingConfig):
         binarize_grippers=config.binarize_grippers,
         gripper_open_threshold=config.gripper_open_threshold,
         gripper_closed_threshold=config.gripper_closed_threshold,
+        state_dropout_prob=config.state_dropout_prob,
+        state_dropout_full_prob=config.state_dropout_full_prob,
     )
 
     # Split into train/val
@@ -81,7 +128,7 @@ def create_dataloaders(config: TrainingConfig):
     print(f"  Train samples: {len(train_dataset)}")
     print(f"  Val samples: {len(val_dataset)}")
 
-    # Create validation dataset without augmentation
+    # Create validation dataset without augmentation or state dropout
     val_dataset_no_aug = RoboTwinVLADataset(
         dataset_root=config.dataset_root,
         norm_stats_path=config.norm_stats_path,
@@ -103,6 +150,8 @@ def create_dataloaders(config: TrainingConfig):
         binarize_grippers=config.binarize_grippers,
         gripper_open_threshold=config.gripper_open_threshold,
         gripper_closed_threshold=config.gripper_closed_threshold,
+        state_dropout_prob=0.0,  # No state dropout during validation
+        state_dropout_full_prob=0.0,
     )
 
     # Use same indices for validation
@@ -115,6 +164,8 @@ def create_dataloaders(config: TrainingConfig):
         processor=processor,
         tokenizer_type=config.tokenizer_type,
         n_bins=config.n_bins,
+        state_reconstruction=config.state_reconstruction,
+        state_reconstruction_only_on_dropout=config.state_reconstruction_only_on_dropout,
     )
 
     # Create dataloaders
@@ -372,6 +423,9 @@ def train(config: TrainingConfig):
 
         # Gradient accumulation complete - do optimizer step
         if micro_step % config.gradient_accumulation_steps == 0:
+            # Compute gradient norms before clipping (for logging)
+            grad_norms = compute_gradient_norms(model.model)
+
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(model.model.parameters(), config.max_grad_norm)
 
@@ -403,6 +457,11 @@ def train(config: TrainingConfig):
                     log_dict = {
                         "train/loss": avg_loss,
                         "train/step": global_step,
+                        # Gradient norms for debugging vision encoder
+                        "grad_norm/vision": grad_norms["grad_norm/vision"],
+                        "grad_norm/lm": grad_norms["grad_norm/lm"],
+                        "grad_norm/embed": grad_norms["grad_norm/embed"],
+                        "grad_norm/total": grad_norms["grad_norm/total"],
                     }
 
                     # Log all learning rates if using parameter groups

@@ -88,6 +88,8 @@ class RoboTwinVLADataset(Dataset):
         binarize_grippers: bool = False,
         gripper_open_threshold: float = 0.95,
         gripper_closed_threshold: float = 0.05,
+        state_dropout_prob: float = 0.0,
+        state_dropout_full_prob: float = 0.0,
     ):
         """
         Args:
@@ -115,6 +117,9 @@ class RoboTwinVLADataset(Dataset):
                 using forward-looking relabeling for intermediate values. Default False.
             gripper_open_threshold: Gripper values > this are considered open (default 0.95).
             gripper_closed_threshold: Gripper values < this are considered closed (default 0.05).
+            state_dropout_prob: Probability of dropping out each individual state value (replaced
+                with "?" in prompt). Forces model to rely on images. Default 0.0 (disabled).
+            state_dropout_full_prob: Probability of dropping ALL state values at once. Default 0.0.
         """
         self.dataset_root = Path(dataset_root)
         self.action_horizon = action_horizon
@@ -236,6 +241,10 @@ class RoboTwinVLADataset(Dataset):
         self.gripper_open_threshold = gripper_open_threshold
         self.gripper_closed_threshold = gripper_closed_threshold
 
+        # State dropout settings (to prevent shortcut learning)
+        self.state_dropout_prob = state_dropout_prob
+        self.state_dropout_full_prob = state_dropout_full_prob
+
         # Zip file cache
         self.zip_cache = ZipFileCache(max_open=cache_size)
 
@@ -243,6 +252,11 @@ class RoboTwinVLADataset(Dataset):
             print(f"\nGripper binarization enabled:")
             print(f"  Open threshold: > {gripper_open_threshold}")
             print(f"  Closed threshold: < {gripper_closed_threshold}")
+
+        if state_dropout_prob > 0 or state_dropout_full_prob > 0:
+            print(f"\nState dropout enabled:")
+            print(f"  Per-value dropout prob: {state_dropout_prob}")
+            print(f"  Full dropout prob: {state_dropout_full_prob}")
 
         print(f"\nDataset ready!")
         print(f"  Episodes: {len(self.index.episodes)}")
@@ -453,6 +467,9 @@ class RoboTwinVLADataset(Dataset):
         # Discretize state (including grippers) for prompt (map to [0, 255])
         discretized_state = discretize_normalized_values(normalized_state_with_grippers, num_bins=256)
 
+        # Generate state dropout mask if enabled
+        state_dropout_mask = self._generate_state_dropout_mask(len(discretized_state))
+
         # Tokenize delta actions
         action_tokens = self.tokenizer.encode(normalized_deltas, return_torch=False)[0]
 
@@ -474,6 +491,7 @@ class RoboTwinVLADataset(Dataset):
 
             # State (discretized for prompt)
             "discretized_state": discretized_state,  # (2*dof + 2,) in [0, 255]
+            "state_dropout_mask": state_dropout_mask,  # Boolean mask, True = dropout (show "?")
 
             # Action targets
             "action_tokens": action_tokens,  # List of token IDs
@@ -493,6 +511,33 @@ class RoboTwinVLADataset(Dataset):
         }
 
         return sample
+
+    def _generate_state_dropout_mask(self, state_dim: int) -> Optional[np.ndarray]:
+        """
+        Generate a dropout mask for state values.
+
+        Args:
+            state_dim: Number of state dimensions
+
+        Returns:
+            Boolean array where True means "drop out this value" (show "?"),
+            or None if no dropout is applied
+        """
+        if self.state_dropout_prob <= 0 and self.state_dropout_full_prob <= 0:
+            return None
+
+        # Check for full dropout first (all values masked)
+        if self.state_dropout_full_prob > 0 and random.random() < self.state_dropout_full_prob:
+            return np.ones(state_dim, dtype=bool)
+
+        # Per-value dropout
+        if self.state_dropout_prob > 0:
+            mask = np.random.random(state_dim) < self.state_dropout_prob
+            # Only return mask if at least one value is dropped
+            if mask.any():
+                return mask
+
+        return None
 
     def _load_and_resize_image(self, compressed_bytes: bytes) -> torch.Tensor:
         """Load compressed image, resize if needed, and apply augmentation."""

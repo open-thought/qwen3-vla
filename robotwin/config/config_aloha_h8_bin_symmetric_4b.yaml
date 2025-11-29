@@ -41,6 +41,16 @@ max_num_transforms: 3
 random_order: false
 val_use_augmentation: false
 
+# State dropout (to prevent shortcut learning via state)
+# Forces model to rely on images by masking state values with "?"
+state_dropout_prob: 0.5  # 50% chance each state value is replaced with "?"
+state_dropout_full_prob: 0.25  # 25% chance ALL state values are masked
+
+# State reconstruction auxiliary task
+# When state is dropped, model must reconstruct full state from images
+state_reconstruction: true
+state_reconstruction_only_on_dropout: true  # Only add reconstruction when state was dropped
+
 # Training split
 validation_split: 0.05
 
@@ -78,7 +88,7 @@ prefetch_factor: 2
 enable_wandb: true
 wandb_project: qwen3-vla-robotwin
 wandb_entity: null
-wandb_run_name: aloha-dataset-h8-bin-symmetric-4b
+wandb_run_name: aloha-h8-bin-sym-4b-state-dropout
 wandb_log_interval: 50
 
 # Mixed precision training (always uses bfloat16)

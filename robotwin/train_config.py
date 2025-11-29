@@ -45,6 +45,19 @@ class TrainingConfig:
     random_order: bool = False
     val_use_augmentation: bool = False  # Disable augmentation for validation
 
+    # State dropout (to prevent shortcut learning via state)
+    # When enabled, randomly replaces state values with "?" in the prompt
+    # This forces the model to rely on images instead of state shortcuts
+    state_dropout_prob: float = 0.0  # Probability of dropping out each state value (0.0 = disabled)
+    state_dropout_full_prob: float = 0.0  # Probability of dropping ALL state values at once (0.0 = disabled)
+
+    # State reconstruction (auxiliary task to force visual understanding)
+    # When enabled with state dropout, appends the full uncorrupted state after actions
+    # Sequence: [masked state prompt] → [actions] → [EOT] → [state tokens] → [EOT]
+    # This forces the model to infer state from images when state is dropped out
+    state_reconstruction: bool = False  # Enable state reconstruction auxiliary task
+    state_reconstruction_only_on_dropout: bool = True  # Only add reconstruction when state was dropped
+
     # Training split
     validation_split: float = 0.05
 
