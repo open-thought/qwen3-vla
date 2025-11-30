@@ -1,0 +1,93 @@
+# FSDP Test Configuration with SHARD_GRAD_OP
+# Shards gradients and optimizer states, keeps full model parameters on each GPU
+# Trade-off: More memory usage than FULL_SHARD, but faster communication
+
+# Model configuration
+model_name: Qwen/Qwen3-VL-2B-Instruct
+original_vocab_size: 151936
+new_vocab_size: 153984
+
+# FSDP configuration - SHARD_GRAD_OP strategy
+use_fsdp: true
+fsdp_sharding_strategy: SHARD_GRAD_OP  # Shard grads & optimizer, keep full params
+fsdp_cpu_offload: false
+fsdp_backward_prefetch: BACKWARD_PRE
+fsdp_state_dict_type: FULL_STATE_DICT
+fsdp_activation_checkpointing: false
+fsdp_sync_module_states: true
+fsdp_use_orig_params: true
+fsdp_limit_all_gathers: true
+
+# Dataset configuration
+dataset_root: /mnt/robotwin/dataset
+norm_stats_path: data/robotwin_norm_stats_test.json
+episode_lengths_path: data/robotwin_episode_lengths_test.json
+action_horizon: 8
+pad_action_horizon: false
+image_size:
+- 320
+- 240
+
+# Data filtering - TEST: single robot and task
+robot_types:
+- franka
+variants:
+- clean_50
+tasks:
+- adjust_bottle
+
+# Image augmentation
+enable_augmentation: true
+max_num_transforms: 3
+random_order: false
+val_use_augmentation: false
+
+# Training split
+validation_split: 0.1
+
+# Training hyperparameters - minimal for testing
+batch_size: 1  # Per-GPU batch size
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-05
+vision_lr: 2.0e-6
+weight_decay: 0.01
+max_grad_norm: 1.0
+max_steps: 20  # Very short run for testing
+warmup_steps: 5
+
+# LoRA configuration
+use_lora: false
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+- q_proj
+- v_proj
+- k_proj
+- o_proj
+
+# Checkpointing and evaluation
+checkpoint_dir: checkpoints/qwen3-vla-fsdp-shardgradop
+save_interval: 10
+val_interval: 10
+max_val_batches: 5
+
+# DataLoader configuration
+num_workers: 2
+prefetch_factor: 2
+
+# WandB logging - disabled for quick test
+enable_wandb: false
+wandb_project: qwen3-vla-robotwin
+wandb_entity: null
+wandb_run_name: fsdp-shardgradop-2gpu
+wandb_log_interval: 5
+
+# Mixed precision training
+use_amp: true
+
+# Seed for reproducibility
+seed: 42
+
+# Resume training
+resume_from_checkpoint: null

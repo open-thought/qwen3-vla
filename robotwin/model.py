@@ -33,6 +33,7 @@ class Qwen3VLAModel(nn.Module):
         self,
         model_name: str = "Qwen/Qwen3-VL-2B-Instruct",
         new_vocab_size: int = 153984,  # 151936 + 2048 (FAST) or 151936 + 256 (Bin)
+        device_map: Optional[str] = "cuda:0",
         use_lora: bool = False,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -45,6 +46,8 @@ class Qwen3VLAModel(nn.Module):
         Args:
             model_name: HuggingFace model name
             new_vocab_size: Extended vocabulary size (original + action tokens)
+            device_map: Device placement strategy. Use "cuda:0" for single-GPU,
+                       None for FSDP/DDP (lets the wrapper handle device placement)
             use_lora: Whether to use LoRA for efficient fine-tuning
             lora_r: LoRA rank
             lora_alpha: LoRA scaling factor
@@ -60,7 +63,7 @@ class Qwen3VLAModel(nn.Module):
         self.model = AutoModelForImageTextToText.from_pretrained(
             model_name,
             dtype=torch.bfloat16,
-            device_map="cuda:0",  # Use only GPU 0 to avoid multi-GPU bfloat16 issues
+            device_map=device_map,
             trust_remote_code=True,
         )
 
@@ -197,7 +200,7 @@ class Qwen3VLAModel(nn.Module):
         print(f"Model saved to {save_directory}")
 
     @classmethod
-    def from_pretrained(cls, model_path: str, **kwargs):
+    def from_pretrained(cls, model_path: str, device_map: str = "cuda:0", **kwargs):
         """Load a fine-tuned model from directory."""
         print(f"Loading model from {model_path}...")
         instance = cls.__new__(cls)
@@ -206,7 +209,7 @@ class Qwen3VLAModel(nn.Module):
         instance.model = AutoModelForImageTextToText.from_pretrained(
             model_path,
             dtype=torch.bfloat16,
-            device_map="cuda:0",  # Use only GPU 0 to avoid multi-GPU bfloat16 issues
+            device_map=device_map,
             trust_remote_code=True,
             **kwargs
         )

@@ -14,6 +14,17 @@ class TrainingConfig:
 
     # Model configuration
     model_name: str = "Qwen/Qwen3-VL-2B-Instruct"
+
+    # FSDP / Distributed training configuration
+    use_fsdp: bool = False  # Enable Fully Sharded Data Parallel for multi-GPU training
+    fsdp_sharding_strategy: str = "FULL_SHARD"  # FULL_SHARD, SHARD_GRAD_OP, NO_SHARD
+    fsdp_cpu_offload: bool = False  # Offload parameters to CPU (saves GPU memory but slower)
+    fsdp_backward_prefetch: str = "BACKWARD_PRE"  # BACKWARD_PRE, BACKWARD_POST, or None
+    fsdp_state_dict_type: str = "FULL_STATE_DICT"  # FULL_STATE_DICT, LOCAL_STATE_DICT, SHARDED_STATE_DICT
+    fsdp_activation_checkpointing: bool = False  # Enable activation checkpointing to save memory
+    fsdp_sync_module_states: bool = True  # Sync module states across ranks at init
+    fsdp_use_orig_params: bool = True  # Required for optimizer state dict compatibility
+    fsdp_limit_all_gathers: bool = True  # Limit concurrent all-gathers for memory efficiency
     original_vocab_size: int = 151936
     new_vocab_size: int = 153984  # 151936 + 2048 FAST tokens (or 151936 + n_bins for bin tokenizer)
     tokenizer_type: str = "fast"  # "fast" (compressed FAST tokenizer) or "bin" (OpenVLA-style bins)

@@ -34,7 +34,7 @@ val_use_augmentation: false
 validation_split: 0.1
 
 # Training hyperparameters - TEST: reduced for faster iteration
-batch_size: 4
+batch_size: 2
 gradient_accumulation_steps: 2
 learning_rate: 1.0e-05
 vision_lr: 2.0e-6
