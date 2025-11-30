@@ -81,6 +81,7 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     max_steps: int = 100000
     warmup_steps: int = 1000
+    use_8bit_optimizer: bool = False  # Use 8-bit Adam from bitsandbytes (4x less optimizer memory)
 
     # LoRA configuration
     use_lora: bool = False

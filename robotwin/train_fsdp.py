@@ -41,6 +41,12 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.checkpoint.filesystem import FileSystemWriter, FileSystemReader
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.optim import AdamW
+
+try:
+    import bitsandbytes as bnb
+    BNB_AVAILABLE = True
+except ImportError:
+    BNB_AVAILABLE = False
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.data import random_split
 from transformers import get_cosine_schedule_with_warmup
@@ -189,13 +195,29 @@ def wrap_model_with_fsdp(model: nn.Module, config: TrainingConfig, local_rank: i
     # Use DDP instead of FSDP with NO_SHARD (deprecated)
     if config.fsdp_sharding_strategy == "NO_SHARD":
         print_rank0("Using DistributedDataParallel (NO_SHARD is deprecated)")
-        # Move model to GPU first
+
+        # Apply activation checkpointing before moving to GPU (for memory efficiency)
+        if config.fsdp_activation_checkpointing:
+            # For DDP/regular models, use HuggingFace's built-in gradient checkpointing
+            if hasattr(model, 'gradient_checkpointing_enable'):
+                model.gradient_checkpointing_enable()
+                print_rank0("Enabled model's built-in gradient checkpointing")
+                # Verify it's actually enabled
+                if hasattr(model, 'is_gradient_checkpointing'):
+                    print_rank0(f"  is_gradient_checkpointing: {model.is_gradient_checkpointing}")
+                if hasattr(model.config, 'use_cache'):
+                    print_rank0(f"  config.use_cache: {model.config.use_cache}")
+            else:
+                print_rank0("Warning: Model does not support gradient_checkpointing_enable()")
+
+        # Move model to GPU
         model = model.to(f"cuda:{local_rank}")
         ddp_model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
             find_unused_parameters=False,  # More efficient if all params are used
+            gradient_as_bucket_view=True,  # Memory optimization: reuse gradient memory for buckets
         )
         return ddp_model
 
@@ -213,7 +235,7 @@ def wrap_model_with_fsdp(model: nn.Module, config: TrainingConfig, local_rank: i
 
     # Apply activation checkpointing if requested
     if config.fsdp_activation_checkpointing:
-        print_rank0("Enabling activation checkpointing...")
+        # For FSDP, use the distributed checkpoint wrapper
         from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
             checkpoint_wrapper,
             CheckpointImpl,
@@ -226,7 +248,7 @@ def wrap_model_with_fsdp(model: nn.Module, config: TrainingConfig, local_rank: i
         )
 
         apply_activation_checkpointing(
-            fsdp_model,
+            model,
             checkpoint_wrapper_fn=non_reentrant_wrapper,
             check_fn=lambda submodule: isinstance(submodule, Qwen2VLDecoderLayer),
         )
@@ -333,6 +355,8 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
     ) if world_size > 1 else None
 
     # Create dataloaders
+    # persistent_workers=True keeps workers alive between batches (faster for heavy collate_fn)
+    use_persistent_workers = config.num_workers > 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
@@ -340,9 +364,10 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         sampler=train_sampler,
         num_workers=config.num_workers,
         collate_fn=collator,
-        prefetch_factor=config.prefetch_factor,
+        prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None,
         pin_memory=True,
         drop_last=True,  # Drop incomplete batches for consistent batch sizes across GPUs
+        persistent_workers=use_persistent_workers,
     )
 
     val_loader = DataLoader(
@@ -352,19 +377,26 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         sampler=val_sampler,
         num_workers=config.num_workers,
         collate_fn=collator,
-        prefetch_factor=config.prefetch_factor,
+        prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None,
         pin_memory=True,
+        persistent_workers=use_persistent_workers,
     )
 
     return train_loader, val_loader, train_sampler
 
 
-def compute_gradient_norms(model, device) -> dict:
+def compute_gradient_norms(model, device, use_fsdp: bool = False) -> dict:
     """
     Compute gradient norms for different parameter groups.
 
     For FSDP models, gradients are sharded across ranks, so we need to
     sum the squared norms across all ranks before taking the square root.
+    For DDP, each rank has full gradients, so no communication is needed.
+
+    Args:
+        model: The model (can be FSDP, DDP, or unwrapped)
+        device: Device for tensor operations
+        use_fsdp: Whether the model uses FSDP (requires all_reduce for correct norms)
     """
     vision_grad_sq = 0.0
     lm_grad_sq = 0.0
@@ -389,8 +421,9 @@ def compute_gradient_norms(model, device) -> dict:
             lm_grad_sq += grad_norm_sq
             lm_param_count += 1
 
-    # For FSDP, sum squared norms across all ranks (gradients are sharded)
-    if dist.is_initialized():
+    # For FSDP only: sum squared norms across all ranks (gradients are sharded)
+    # For DDP: each rank has full gradients after backward(), no communication needed
+    if use_fsdp and dist.is_initialized():
         grad_sq_tensor = torch.tensor(
             [vision_grad_sq, lm_grad_sq, embed_grad_sq],
             device=device
@@ -417,6 +450,7 @@ def train_step(model, batch, device, use_amp, debug=False):
 
     if debug:
         print(f"[Rank {rank}] Moving batch to device {device}")
+        print(f"[Rank {rank}] GPU memory before batch move: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB allocated, {torch.cuda.memory_reserved(device) / 1e9:.2f} GB reserved")
 
     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
@@ -436,9 +470,11 @@ def train_step(model, batch, device, use_amp, debug=False):
 
     if debug:
         print(f"[Rank {rank}] Starting backward...")
+        print(f"[Rank {rank}] GPU memory before backward: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB allocated, {torch.cuda.memory_reserved(device) / 1e9:.2f} GB reserved")
     loss.backward()
     if debug:
         print(f"[Rank {rank}] Backward done")
+        print(f"[Rank {rank}] GPU memory after backward: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB allocated, {torch.cuda.memory_reserved(device) / 1e9:.2f} GB reserved")
 
     return loss.item()
 
@@ -951,6 +987,19 @@ def train(config: TrainingConfig):
         model = model.to(device)  # type: ignore[arg-type]
 
     # Create optimizer
+    # Select optimizer class
+    use_8bit = getattr(config, 'use_8bit_optimizer', False)
+    if use_8bit:
+        if not BNB_AVAILABLE:
+            print_rank0("Warning: bitsandbytes not available, falling back to standard AdamW")
+            print_rank0("  Install with: pip install bitsandbytes")
+            optimizer_cls = AdamW
+        else:
+            print_rank0("Using 8-bit AdamW optimizer (4x less optimizer memory)")
+            optimizer_cls = bnb.optim.AdamW8bit
+    else:
+        optimizer_cls = AdamW
+
     if config.vision_lr is not None:
         print_rank0(f"\nUsing separate learning rates:")
         print_rank0(f"  Vision tower LR: {config.vision_lr:.2e}")
@@ -971,9 +1020,9 @@ def train(config: TrainingConfig):
             {"params": other_params, "lr": config.learning_rate, "weight_decay": config.weight_decay},
             {"params": vision_params, "lr": config.vision_lr, "weight_decay": config.weight_decay},
         ]
-        optimizer = AdamW(optimizer_grouped_parameters)
+        optimizer = optimizer_cls(optimizer_grouped_parameters)
     else:
-        optimizer = AdamW(
+        optimizer = optimizer_cls(
             model.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
@@ -1026,24 +1075,31 @@ def train(config: TrainingConfig):
 
             # Training step (debug first 3 steps)
             debug_step = micro_step < 3
-            loss = train_step(model, batch, device, config.use_amp, debug=debug_step)
+
+            # For DDP: skip gradient sync during accumulation steps (sync only on last step)
+            # This reduces communication overhead by gradient_accumulation_steps factor
+            # Note: requires more memory as gradients accumulate locally
+            is_accumulation_step = (micro_step + 1) % config.gradient_accumulation_steps != 0
+            is_ddp = isinstance(model, torch.nn.parallel.DistributedDataParallel)
+
+            if is_ddp and is_accumulation_step:
+                with model.no_sync():
+                    loss = train_step(model, batch, device, config.use_amp, debug=debug_step)
+            else:
+                loss = train_step(model, batch, device, config.use_amp, debug=debug_step)
+
             running_loss += loss
             micro_step += 1
 
             # Gradient accumulation complete
             if micro_step % config.gradient_accumulation_steps == 0:
                 if debug_step:
-                    print(f"[Rank {rank}] Gradient accumulation complete, syncing...")
-
-                # Synchronize before gradient operations to ensure all ranks are at the same point
-                if dist.is_initialized():
-                    dist.barrier()
-
-                if debug_step:
+                    print(f"[Rank {rank}] Gradient accumulation complete")
                     print(f"[Rank {rank}] Computing gradient norms...")
 
                 # Compute gradient norms before clipping (for logging)
-                grad_norms = compute_gradient_norms(model, device)
+                # use_fsdp=True only for actual FSDP (not DDP with NO_SHARD)
+                grad_norms = compute_gradient_norms(model, device, use_fsdp=isinstance(model, FSDP))
 
                 if debug_step:
                     print(f"[Rank {rank}] Gradient norms computed, clipping...")
@@ -1056,6 +1112,7 @@ def train(config: TrainingConfig):
 
                 if debug_step:
                     print(f"[Rank {rank}] Gradients clipped, stepping optimizer...")
+                    print(f"[Rank {rank}] GPU memory before optimizer.step(): {torch.cuda.memory_allocated(device) / 1e9:.2f} GB allocated, {torch.cuda.memory_reserved(device) / 1e9:.2f} GB reserved")
 
                 optimizer.step()
                 scheduler.step()
@@ -1063,6 +1120,7 @@ def train(config: TrainingConfig):
 
                 if debug_step:
                     print(f"[Rank {rank}] Optimizer step complete")
+                    print(f"[Rank {rank}] GPU memory after optimizer.step(): {torch.cuda.memory_allocated(device) / 1e9:.2f} GB allocated, {torch.cuda.memory_reserved(device) / 1e9:.2f} GB reserved")
 
                 global_step += 1
                 if pbar:
