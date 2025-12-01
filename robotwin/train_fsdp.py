@@ -553,7 +553,7 @@ class AppState(Stateful):
             )
 
 
-def save_checkpoint_dcp(model, optimizer, scheduler, step, config, is_best=False):
+def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=None, is_best=False):
     """
     Save checkpoint using PyTorch Distributed Checkpoint (DCP).
 
@@ -561,19 +561,27 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, is_best=False
     - Each rank saves its own shard (no gathering to rank 0)
     - Supports automatic resharding when loading with different world sizes
     - Much faster for FSDP models since there's no all-gather communication
+
+    For DDP/single-GPU models, saves in HuggingFace format using save_pretrained().
     """
     checkpoint_dir = Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Handle DDP wrapped models - use standard torch.save
+    # Handle DDP wrapped models - save in HuggingFace format
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         if is_main_process():
-            model_state = model.module.state_dict()
             model_path = checkpoint_dir / f"step_{step}"
             model_path.mkdir(parents=True, exist_ok=True)
-            torch.save(model_state, model_path / "model_state.pt")
 
-            # Save training state
+            # Save model using HuggingFace save_pretrained
+            print(f"Saving model to {model_path} (HuggingFace format)...")
+            model.module.save_pretrained(model_path)
+
+            # Save processor if available
+            if processor is not None:
+                processor.save_pretrained(model_path)
+
+            # Save training state (optimizer, scheduler, step)
             torch.save({
                 "step": step,
                 "config": config.to_dict(),
@@ -586,7 +594,13 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, is_best=False
             if is_best:
                 best_path = checkpoint_dir / "best_model"
                 best_path.mkdir(parents=True, exist_ok=True)
-                torch.save(model_state, best_path / "model_state.pt")
+
+                print(f"Saving best model to {best_path} (HuggingFace format)...")
+                model.module.save_pretrained(best_path)
+
+                if processor is not None:
+                    processor.save_pretrained(best_path)
+
                 torch.save({
                     "step": step,
                     "config": config.to_dict(),
@@ -602,11 +616,18 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, is_best=False
     # Handle regular (non-wrapped) models - for single GPU mode
     if not isinstance(model, FSDP):
         if is_main_process():
-            model_state = model.state_dict()
             model_path = checkpoint_dir / f"step_{step}"
             model_path.mkdir(parents=True, exist_ok=True)
-            torch.save(model_state, model_path / "model_state.pt")
 
+            # Save model using HuggingFace save_pretrained
+            print(f"Saving model to {model_path} (HuggingFace format)...")
+            model.save_pretrained(model_path)
+
+            # Save processor if available
+            if processor is not None:
+                processor.save_pretrained(model_path)
+
+            # Save training state
             torch.save({
                 "step": step,
                 "config": config.to_dict(),
@@ -619,7 +640,13 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, is_best=False
             if is_best:
                 best_path = checkpoint_dir / "best_model"
                 best_path.mkdir(parents=True, exist_ok=True)
-                torch.save(model_state, best_path / "model_state.pt")
+
+                print(f"Saving best model to {best_path} (HuggingFace format)...")
+                model.save_pretrained(best_path)
+
+                if processor is not None:
+                    processor.save_pretrained(best_path)
+
                 torch.save({
                     "step": step,
                     "config": config.to_dict(),
@@ -1186,11 +1213,11 @@ def train(config: TrainingConfig):
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        save_checkpoint_dcp(model, optimizer, scheduler, global_step, config, is_best=True)
+                        save_checkpoint_dcp(model, optimizer, scheduler, global_step, config, processor=processor, is_best=True)
 
                 # Save checkpoint
                 if global_step % config.save_interval == 0:
-                    save_checkpoint_dcp(model, optimizer, scheduler, global_step, config)
+                    save_checkpoint_dcp(model, optimizer, scheduler, global_step, config, processor=processor)
 
         epoch += 1
 
@@ -1199,7 +1226,7 @@ def train(config: TrainingConfig):
 
     # Final save
     print_rank0("\nTraining complete!")
-    save_checkpoint_dcp(model, optimizer, scheduler, global_step, config)
+    save_checkpoint_dcp(model, optimizer, scheduler, global_step, config, processor=processor)
 
     if config.enable_wandb and WANDB_AVAILABLE and is_main_process():
         wandb.finish()

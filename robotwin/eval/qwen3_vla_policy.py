@@ -496,8 +496,14 @@ class Qwen3VLAPolicy:
         """
         Convert delta joint actions to absolute joint positions.
 
+        Delta actions are defined relative to the current state at t=0 (observation time),
+        NOT as incremental deltas between consecutive timesteps. This matches the training
+        data preparation in robotwin_dataset.py where:
+            delta_joints[t] = future_joints[t] - current_state[0]
+
         Args:
-            delta_joints: Delta actions for joints (action_horizon, 2*dof)
+            delta_joints: Delta actions for joints (action_horizon, 2*dof),
+                         each relative to current_arm_pos at observation time
             future_grippers: Predicted gripper positions (action_horizon, 2)
 
         Returns:
@@ -509,13 +515,10 @@ class Qwen3VLAPolicy:
             self.current_qpos[self.dof + 1:self.dof + 1 + self.dof],  # right arm
         ])
 
-        # Accumulate deltas for joint positions
-        absolute_arm = np.zeros_like(delta_joints)
-        for t in range(delta_joints.shape[0]):
-            if t == 0:
-                absolute_arm[t] = current_arm_pos + delta_joints[t]
-            else:
-                absolute_arm[t] = absolute_arm[t-1] + delta_joints[t]
+        # Convert deltas to absolute positions
+        # All deltas are relative to current_arm_pos (the state at observation time)
+        # NOT incremental deltas between consecutive timesteps
+        absolute_arm = current_arm_pos[None, :] + delta_joints  # (action_horizon, 2*dof)
 
         # Combine joint positions with predicted gripper values
         actions = np.zeros((delta_joints.shape[0], 14))
