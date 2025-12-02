@@ -230,59 +230,6 @@ class VLADataCollator:
 
         return batch_inputs
 
-    def decode_action_tokens(
-        self,
-        token_ids: torch.Tensor,
-        action_horizon: int,
-        action_dim: int,
-        normalizer,
-        robot_type: str
-    ) -> torch.Tensor:
-        """
-        Decode predicted action tokens back to robot actions.
-
-        Args:
-            token_ids: Predicted token IDs (batch, seq_len)
-            action_horizon: Action prediction horizon
-            action_dim: Action dimension (2*dof + 2 for joints + grippers)
-            normalizer: MultiRobotNormalizer instance
-            robot_type: Robot type for denormalization
-
-        Returns:
-            Decoded actions (batch, action_horizon, action_dim)
-        """
-        from action_tokenizer import ActionTokenizer
-
-        # Initialize tokenizer
-        tokenizer = ActionTokenizer()
-
-        # Filter to only FAST tokens
-        batch_size = token_ids.shape[0]
-        action_token_sequences = []
-
-        for i in range(batch_size):
-            # Get tokens in FAST range
-            tokens = token_ids[i]
-            fast_tokens = tokens[
-                (tokens >= self.action_token_start) & (tokens <= self.action_token_end)
-            ].tolist()
-            action_token_sequences.append(fast_tokens)
-
-        # Decode using FAST tokenizer
-        normalized_deltas = tokenizer.decode(
-            action_token_sequences,
-            action_horizon=action_horizon,
-            action_dim=action_dim
-        )
-
-        # Denormalize
-        denormalized_deltas = normalizer.denormalize_delta_actions(
-            normalized_deltas,
-            robot_type=robot_type
-        )
-
-        return torch.from_numpy(denormalized_deltas).float()
-
 
 def test_collator():
     """Test the data collator."""
