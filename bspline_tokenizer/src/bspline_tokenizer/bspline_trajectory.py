@@ -182,7 +182,8 @@ class BSplineTrajectory:
         trajectory: np.ndarray,
         n_control_points: int = 8,
         degree: int = 4,
-        bounds: Optional[Tuple[float, float]] = None
+        bounds: Optional[Tuple[float, float]] = None,
+        pin_endpoints: bool = False
     ) -> 'BSplineTrajectory':
         """
         Fit a B-spline trajectory to data.
@@ -197,6 +198,12 @@ class BSplineTrajectory:
             degree: B-spline polynomial degree (must satisfy n_control_points >= degree + 1)
             bounds: Optional (lower, upper) bounds for control point values.
                     If None, uses unconstrained least squares fitting.
+                    Note: When pin_endpoints=True, bounds only apply to interior
+                    control points; endpoints are set to the data values.
+            pin_endpoints: If True, pin the B-spline to pass exactly through
+                    the first and last data points. This sets the first control
+                    point to trajectory[0] and the last to trajectory[-1], then
+                    solves for the interior control points. Default is False.
 
         Returns:
             BSplineTrajectory fitted to the data
@@ -205,12 +212,21 @@ class BSplineTrajectory:
             t = np.linspace(0, 1, 100)
             trajectory = np.sin(2 * np.pi * t).reshape(-1, 1)
             traj = BSplineTrajectory.fit(t, trajectory, n_control_points=8)
+
+            # Pin curve to pass exactly through endpoints
+            traj = BSplineTrajectory.fit(t, trajectory, pin_endpoints=True)
         """
         if n_control_points < degree + 1:
             raise ValueError(f"n_control_points ({n_control_points}) must be >= degree + 1 ({degree + 1})")
 
         if trajectory.ndim == 1:
             trajectory = trajectory.reshape(-1, 1)
+
+        if len(t) == 0 or trajectory.shape[0] == 0:
+            raise ValueError("Cannot fit B-spline to empty trajectory (need at least 1 data point)")
+
+        if len(t) != trajectory.shape[0]:
+            raise ValueError(f"Length mismatch: t has {len(t)} points but trajectory has {trajectory.shape[0]} points")
 
         n_dof = trajectory.shape[1]
         knots = create_clamped_knot_vector(n_control_points, degree)
@@ -219,14 +235,43 @@ class BSplineTrajectory:
         control_points = np.zeros((n_dof, n_control_points))
 
         for dof in range(n_dof):
-            if bounds is not None:
-                result = lsq_linear(basis_matrix, trajectory[:, dof], bounds=bounds)
-                control_points[dof] = result.x
+            y = trajectory[:, dof]
+
+            if pin_endpoints:
+                # Fix first and last control points to match data endpoints
+                # For clamped B-splines: curve(0) = c[0], curve(1) = c[-1]
+                c_first = y[0]
+                c_last = y[-1]
+
+                # Solve for interior control points only
+                # B @ c = y  =>  B_interior @ c_interior = y - B_first * c_first - B_last * c_last
+                B_first = basis_matrix[:, 0:1]  # (n_points, 1)
+                B_last = basis_matrix[:, -1:]   # (n_points, 1)
+                B_interior = basis_matrix[:, 1:-1]  # (n_points, n_cp - 2)
+
+                y_adjusted = y - B_first.ravel() * c_first - B_last.ravel() * c_last
+
+                if n_control_points > 2:
+                    if bounds is not None:
+                        result = lsq_linear(B_interior, y_adjusted, bounds=bounds)
+                        c_interior = result.x
+                    else:
+                        c_interior, _, _, _ = np.linalg.lstsq(B_interior, y_adjusted, rcond=None)
+                else:
+                    c_interior = np.array([])
+
+                control_points[dof, 0] = c_first
+                control_points[dof, 1:-1] = c_interior
+                control_points[dof, -1] = c_last
             else:
-                # Unconstrained least squares
-                control_points[dof], _, _, _ = np.linalg.lstsq(
-                    basis_matrix, trajectory[:, dof], rcond=None
-                )
+                if bounds is not None:
+                    result = lsq_linear(basis_matrix, y, bounds=bounds)
+                    control_points[dof] = result.x
+                else:
+                    # Unconstrained least squares
+                    control_points[dof], _, _, _ = np.linalg.lstsq(
+                        basis_matrix, y, rcond=None
+                    )
 
         return cls(control_points, degree=degree, knots=knots)
 

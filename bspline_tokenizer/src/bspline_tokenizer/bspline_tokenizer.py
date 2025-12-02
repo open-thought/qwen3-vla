@@ -171,13 +171,16 @@ class BSplineTokenizer:
         else:  # joint_first
             return values.reshape(self.n_dof, self.n_control_points)
 
-    def encode(self, t: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
+    def encode(self, t: np.ndarray, trajectory: np.ndarray,
+               pin_endpoints: bool = True) -> np.ndarray:
         """
         Encode a trajectory as discrete tokens.
 
         Args:
             t: Time/parameter values of shape (n_timesteps,), should be in [0, 1]
             trajectory: Trajectory data of shape (n_timesteps, n_dof)
+            pin_endpoints: If True, pin the B-spline to pass exactly through
+                    the first and last data points. Default is True.
 
         Returns:
             Integer token array of shape (n_dof * n_control_points,)
@@ -193,7 +196,8 @@ class BSplineTokenizer:
             t, trajectory,
             n_control_points=self.n_control_points,
             degree=self.degree,
-            bounds=self.bounds
+            bounds=self.bounds,
+            pin_endpoints=pin_endpoints
         )
         return self._control_points_to_tokens(bspline_traj.control_points)
 

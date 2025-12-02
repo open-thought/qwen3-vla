@@ -192,6 +192,73 @@ class TestBSplineTrajectory:
         assert np.all(traj.control_points >= -1.5)
         assert np.all(traj.control_points <= 1.5)
 
+    def test_fit_pin_endpoints(self):
+        """Test fitting with pin_endpoints=True passes through data endpoints."""
+        t = np.linspace(0, 1, 20)
+        trajectory = np.sin(2 * np.pi * t).reshape(-1, 1)
+
+        # Without pin_endpoints, curve may not pass exactly through endpoints
+        traj_normal = BSplineTrajectory.fit(t, trajectory, n_control_points=8, degree=4)
+        val_start_normal = traj_normal.evaluate(0.0)[0]
+        val_end_normal = traj_normal.evaluate(1.0)[0]
+
+        # With pin_endpoints, curve must pass exactly through endpoints
+        traj_pinned = BSplineTrajectory.fit(
+            t, trajectory, n_control_points=8, degree=4, pin_endpoints=True
+        )
+        val_start_pinned = traj_pinned.evaluate(0.0)[0]
+        val_end_pinned = traj_pinned.evaluate(1.0)[0]
+
+        # Pinned endpoints should match data exactly
+        np.testing.assert_allclose(val_start_pinned, trajectory[0, 0], atol=1e-10)
+        np.testing.assert_allclose(val_end_pinned, trajectory[-1, 0], atol=1e-10)
+
+        # Normal fit typically has small endpoint error
+        assert abs(val_start_normal - trajectory[0, 0]) > 1e-6 or \
+               abs(val_end_normal - trajectory[-1, 0]) > 1e-6
+
+    def test_fit_pin_endpoints_multi_dof(self):
+        """Test pin_endpoints works with multi-DoF trajectories."""
+        t = np.linspace(0, 1, 30)
+        trajectory = np.column_stack([
+            np.sin(2 * np.pi * t),
+            np.cos(2 * np.pi * t),
+            t ** 2 - 0.5
+        ])
+
+        traj = BSplineTrajectory.fit(
+            t, trajectory, n_control_points=8, degree=4, pin_endpoints=True
+        )
+
+        # Check all DoFs pass through endpoints
+        val_start = traj.evaluate(0.0)
+        val_end = traj.evaluate(1.0)
+
+        np.testing.assert_allclose(val_start, trajectory[0, :], atol=1e-10)
+        np.testing.assert_allclose(val_end, trajectory[-1, :], atol=1e-10)
+
+    def test_fit_pin_endpoints_with_bounds(self):
+        """Test pin_endpoints works together with bounds."""
+        t = np.linspace(0, 1, 30)
+        # Trajectory with values well within bounds
+        trajectory = 0.5 * np.sin(2 * np.pi * t).reshape(-1, 1)
+
+        traj = BSplineTrajectory.fit(
+            t, trajectory, n_control_points=8, degree=4,
+            bounds=(-1.5, 1.5), pin_endpoints=True
+        )
+
+        # Endpoints should be exact (endpoints are not subject to bounds)
+        val_start = traj.evaluate(0.0)[0]
+        val_end = traj.evaluate(1.0)[0]
+        np.testing.assert_allclose(val_start, trajectory[0, 0], atol=1e-10)
+        np.testing.assert_allclose(val_end, trajectory[-1, 0], atol=1e-10)
+
+        # Interior control points should respect bounds
+        interior_cps = traj.control_points[0, 1:-1]
+        assert np.all(interior_cps >= -1.5)
+        assert np.all(interior_cps <= 1.5)
+
     def test_fit_reconstruction_quality(self):
         """Test that fitted trajectory reconstructs original well."""
         t = np.linspace(0, 1, 100)
@@ -211,6 +278,43 @@ class TestBSplineTrajectory:
 
         with pytest.raises(ValueError, match="n_control_points.*must be >= degree"):
             BSplineTrajectory.fit(t, trajectory, n_control_points=3, degree=4)
+
+    def test_fit_empty_trajectory(self):
+        """Test that empty trajectory raises error."""
+        t = np.array([])
+        trajectory = np.array([]).reshape(-1, 1)
+
+        with pytest.raises(ValueError, match="Cannot fit B-spline to empty trajectory"):
+            BSplineTrajectory.fit(t, trajectory, n_control_points=6, degree=3)
+
+    def test_fit_length_mismatch(self):
+        """Test that mismatched t and trajectory lengths raise error."""
+        t = np.array([0.0, 0.5, 1.0])
+        trajectory = np.array([[0.3], [-0.5]])  # Only 2 points
+
+        with pytest.raises(ValueError, match="Length mismatch"):
+            BSplineTrajectory.fit(t, trajectory, n_control_points=6, degree=3)
+
+    def test_fit_single_point(self):
+        """Test fitting with a single data point."""
+        t = np.array([0.5])
+        trajectory = np.array([[0.3]])
+
+        traj = BSplineTrajectory.fit(t, trajectory, n_control_points=6, degree=3)
+        # Should create a constant-ish trajectory
+        val = traj.evaluate(0.5)[0]
+        np.testing.assert_allclose(val, 0.3, atol=0.01)
+
+    def test_fit_two_points(self):
+        """Test fitting with two data points."""
+        t = np.array([0.0, 1.0])
+        trajectory = np.array([[0.3], [-0.5]])
+
+        traj = BSplineTrajectory.fit(t, trajectory, n_control_points=6, degree=3, pin_endpoints=True)
+        # Endpoints should be close to data
+        vals = traj.evaluate(np.array([0.0, 1.0]))
+        np.testing.assert_allclose(vals[0, 0], 0.3, atol=0.01)
+        np.testing.assert_allclose(vals[1, 0], -0.5, atol=0.01)
 
 
 class TestBSplineTokenizer:
