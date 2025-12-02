@@ -25,13 +25,15 @@ Example usage:
 """
 
 import numpy as np
+from functools import lru_cache
 from typing import Tuple, Optional
 from scipy.optimize import lsq_linear
 
 
+@lru_cache(maxsize=32)
 def create_clamped_knot_vector(n_control_points: int, degree: int) -> np.ndarray:
     """
-    Create a clamped (open) knot vector for B-splines.
+    Create a clamped (open) knot vector for B-splines (memoized).
 
     For a clamped B-spline:
     - First (degree+1) knots are 0
@@ -135,7 +137,7 @@ class BSplineTrajectory:
         n_dof: Number of degrees of freedom
         n_control_points: Number of control points per DoF
         degree: B-spline polynomial degree
-        knots: Knot vector
+        knots: knot vector
 
     Example:
         # Fit directly from trajectory data

@@ -30,7 +30,7 @@ Usage:
 """
 
 import numpy as np
-from typing import Optional, List, Tuple
+from typing import Optional
 from collections import deque
 from .bspline_tokenizer import BSplineTokenizer
 from .bspline_trajectory import BSplineTrajectory

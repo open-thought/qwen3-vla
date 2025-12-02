@@ -37,11 +37,7 @@ Example usage:
 import numpy as np
 from typing import Tuple, Optional, Literal
 
-from .bspline_trajectory import (
-    BSplineTrajectory,
-    create_clamped_knot_vector,
-    bspline_basis_matrix,
-)
+from .bspline_trajectory import BSplineTrajectory
 
 
 class BSplineTokenizer:
@@ -100,9 +96,6 @@ class BSplineTokenizer:
         self.bounds = bounds
         self.n_bins = n_bins
         self.token_order = token_order
-
-        # Precompute knot vector (same for all DoFs)
-        self.knots = create_clamped_knot_vector(n_control_points, degree)
 
         # Derived properties
         self.vocab_size = n_bins
@@ -216,7 +209,7 @@ class BSplineTokenizer:
             raise ValueError(f"Expected {self.n_tokens} tokens, got {len(tokens)}")
 
         control_points = self._tokens_to_control_points(tokens)
-        return BSplineTrajectory(control_points, degree=self.degree, knots=self.knots)
+        return BSplineTrajectory(control_points, degree=self.degree)
 
     def get_control_points_from_tokens(self, tokens: np.ndarray) -> np.ndarray:
         """
