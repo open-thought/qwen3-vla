@@ -224,7 +224,7 @@ class TestBSplineTokenizer:
             n_control_points=8,
             degree=4,
             bounds=(-1.5, 1.5),
-            n_bins=256,
+            n_bins=255,
             token_order="basis_first",
         )
 
@@ -245,8 +245,8 @@ class TestBSplineTokenizer:
         assert tokenizer.n_control_points == 8
         assert tokenizer.degree == 4
         assert tokenizer.bounds == (-1.5, 1.5)
-        assert tokenizer.n_bins == 256
-        assert tokenizer.vocab_size == 256
+        assert tokenizer.n_bins == 255
+        assert tokenizer.vocab_size == 255
         assert tokenizer.n_tokens == 56  # 7 * 8
 
     def test_init_invalid_params(self):
@@ -293,6 +293,52 @@ class TestBSplineTokenizer:
         # Should reconstruct reasonably well (allowing for quantization)
         mae = np.mean(np.abs(reconstructed - trajectory))
         assert mae < 0.05  # Allow some quantization error
+
+    def test_null_trajectory_roundtrip(self, tokenizer):
+        """Test that null trajectory (all zeros) roundtrips perfectly."""
+        t = np.linspace(0, 1, 50)
+        trajectory = np.zeros((50, tokenizer.n_dof))
+
+        tokens = tokenizer.encode(t, trajectory)
+        decoded = tokenizer.decode(tokens)
+        reconstructed = decoded.evaluate(t)
+
+        # With 255 bins (odd) and symmetric bounds, zero should be exactly representable
+        np.testing.assert_allclose(reconstructed, trajectory, atol=1e-10)
+
+    def test_roundtrip_511_bins(self):
+        """Test encode-decode roundtrip with 511 bins."""
+        tokenizer = BSplineTokenizer(n_dof=7, n_bins=511)
+        np.random.seed(123)
+        t = np.linspace(0, 1, 50)
+        trajectory = np.zeros((50, 7))
+        for dof in range(7):
+            freq = np.random.uniform(0.5, 2)
+            trajectory[:, dof] = 0.5 * np.sin(2 * np.pi * freq * t)
+
+        tokens = tokenizer.encode(t, trajectory)
+        decoded = tokenizer.decode(tokens)
+        reconstructed = decoded.evaluate(t)
+
+        mae = np.mean(np.abs(reconstructed - trajectory))
+        assert mae < 0.05
+
+    def test_roundtrip_512_bins(self):
+        """Test encode-decode roundtrip with 512 bins."""
+        tokenizer = BSplineTokenizer(n_dof=7, n_bins=512)
+        np.random.seed(123)
+        t = np.linspace(0, 1, 50)
+        trajectory = np.zeros((50, 7))
+        for dof in range(7):
+            freq = np.random.uniform(0.5, 2)
+            trajectory[:, dof] = 0.5 * np.sin(2 * np.pi * freq * t)
+
+        tokens = tokenizer.encode(t, trajectory)
+        decoded = tokenizer.decode(tokens)
+        reconstructed = decoded.evaluate(t)
+
+        mae = np.mean(np.abs(reconstructed - trajectory))
+        assert mae < 0.05
 
     def test_decode_invalid_length(self, tokenizer):
         """Test that decode raises error for wrong token length."""

@@ -89,7 +89,7 @@ action = ensemble.get_action(timestep=10)
 | `n_control_points` | Control points per DoF | 8 |
 | `degree` | B-spline degree | 4 |
 | `bounds` | Control point bounds | (-1.5, 1.5) |
-| `n_bins` | Quantization bins | 256 |
+| `n_bins` | Quantization bins (odd for zero-centered) | 255 |
 | `token_order` | `'basis_first'` or `'joint_first'` | `'basis_first'` |
 
 ## Testing

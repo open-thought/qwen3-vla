@@ -66,7 +66,7 @@ class BSplineTokenizer:
         n_control_points: int = 8,
         degree: int = 4,
         bounds: Tuple[float, float] = (-1.5, 1.5),
-        n_bins: int = 256,
+        n_bins: int = 255,
         token_order: Literal['basis_first', 'joint_first'] = 'basis_first'
     ):
         """
@@ -77,7 +77,9 @@ class BSplineTokenizer:
             n_control_points: Number of B-spline control points per DoF
             degree: B-spline polynomial degree (must satisfy n_control_points >= degree + 1)
             bounds: (lower, upper) bounds for control point values during fitting and quantization
-            n_bins: Number of quantization bins (e.g., 256 for 8-bit)
+            n_bins: Number of quantization bins. Default is 255 (odd) to ensure zero maps
+                    exactly to the center bin with symmetric bounds, and can be padded to 256
+                    for vocabulary size.
             token_order: Order of tokens in output:
                 - 'basis_first': [cp0_j0, cp0_j1, ..., cp0_jN, cp1_j0, cp1_j1, ...]
                   (all joints for basis 0, then all joints for basis 1, etc.)
@@ -295,7 +297,7 @@ def tokenize_trajectory(
     n_control_points: int = 8,
     degree: int = 4,
     bounds: Tuple[float, float] = (-1.5, 1.5),
-    n_bins: int = 256,
+    n_bins: int = 255,
     token_order: Literal['basis_first', 'joint_first'] = 'basis_first'
 ) -> Tuple[np.ndarray, BSplineTokenizer]:
     """
