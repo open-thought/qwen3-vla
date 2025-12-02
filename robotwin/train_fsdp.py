@@ -49,7 +49,7 @@ except ImportError:
     BNB_AVAILABLE = False
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.data import random_split
-from transformers import get_cosine_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup, AutoModelForImageTextToText, AutoProcessor
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLDecoderLayer
 from tqdm import tqdm
 
@@ -702,17 +702,68 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
         dist.barrier()
 
 
-def load_checkpoint_dcp(model, optimizer, scheduler, checkpoint_path):
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
     """
-    Load checkpoint using PyTorch Distributed Checkpoint (DCP).
+    Load checkpoint from various formats.
 
-    Supports automatic resharding - can load a checkpoint saved with N GPUs
-    and resume training with M GPUs.
+    Supports:
+    - HuggingFace format (saved with save_pretrained())
+    - DCP format (PyTorch Distributed Checkpoint) with automatic resharding
+    - Legacy format (single model_state.pt file)
     """
     checkpoint_path = Path(checkpoint_path)
 
-    # Check if this is a DCP checkpoint (directory with .distcp files) or legacy format
+    # Check checkpoint format:
+    # 1. HuggingFace format (has config.json)
+    # 2. DCP format (has .metadata)
+    # 3. Legacy format (has model_state.pt)
+    is_hf_checkpoint = (checkpoint_path / "config.json").exists()
     is_dcp_checkpoint = (checkpoint_path / ".metadata").exists()
+
+    if is_hf_checkpoint:
+        # HuggingFace format - use from_pretrained()
+        print_rank0(f"Loading HuggingFace checkpoint from {checkpoint_path}")
+
+        if isinstance(model, FSDP):
+            raise ValueError(
+                "Cannot load HuggingFace checkpoint into FSDP model. "
+                "Use DCP checkpoints for FSDP training."
+            )
+
+        # Load the model using from_pretrained
+        loaded_model = AutoModelForImageTextToText.from_pretrained(
+            str(checkpoint_path),
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+
+        # Copy weights to the existing model
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model.module.load_state_dict(loaded_model.state_dict())
+        else:
+            model.load_state_dict(loaded_model.state_dict())
+
+        # Free the loaded model
+        del loaded_model
+
+        # Load training state if available
+        training_state_path = checkpoint_path / "training_state.pt"
+        if training_state_path.exists():
+            training_state = torch.load(training_state_path, map_location="cpu")
+            if optimizer is not None and "optimizer_state_dict" in training_state:
+                optimizer.load_state_dict(training_state["optimizer_state_dict"])
+            if scheduler is not None and "scheduler_state_dict" in training_state:
+                try:
+                    scheduler.load_state_dict(training_state["scheduler_state_dict"])
+                except (IndexError, KeyError) as e:
+                    print_rank0(f"Warning: Could not load scheduler state: {e}")
+            step = training_state.get("step", 0)
+            print_rank0(f"Loaded checkpoint from step {step}")
+            return step
+
+        print_rank0("No training_state.pt found, starting from step 0")
+        return 0
 
     if not is_dcp_checkpoint:
         # Legacy format - single model_state.pt file
@@ -784,8 +835,6 @@ def export_checkpoint(config: TrainingConfig, checkpoint_path: str, output_path:
         torchrun --nproc_per_node=1 train_fsdp.py --config config.yaml \\
             --export checkpoints/step_1000 --export-output exported_model/
     """
-    from transformers import AutoProcessor
-
     checkpoint_path = Path(checkpoint_path)
     output_path = Path(output_path)
 
@@ -821,8 +870,8 @@ def export_checkpoint(config: TrainingConfig, checkpoint_path: str, output_path:
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=1)
 
     # Load the DCP checkpoint
-    print_rank0(f"\nLoading DCP checkpoint from {checkpoint_path}...")
-    step = load_checkpoint_dcp(model, optimizer, scheduler, str(checkpoint_path))
+    print_rank0(f"\nLoading checkpoint from {checkpoint_path}...")
+    step = load_checkpoint(model, optimizer, scheduler, str(checkpoint_path))
     print_rank0(f"Loaded checkpoint from step {step}")
 
     # Now gather the full state dict and save
@@ -848,8 +897,6 @@ def export_checkpoint(config: TrainingConfig, checkpoint_path: str, output_path:
 
         # Load a fresh model on CPU to load the state dict into
         print("Loading fresh model for export...")
-        from transformers import AutoModelForImageTextToText
-
         export_model = AutoModelForImageTextToText.from_pretrained(
             config.model_name,
             dtype=torch.bfloat16,
@@ -900,8 +947,6 @@ def export_checkpoint(config: TrainingConfig, checkpoint_path: str, output_path:
 
 def load_model_for_fsdp(config: TrainingConfig):
     """Load model in a way that's compatible with FSDP wrapping."""
-    from transformers import AutoModelForImageTextToText, AutoProcessor
-
     # Each rank loads the model independently (same weights from HF cache)
     # No barriers needed here since we're not syncing yet
     print(f"[Rank {get_rank()}] Loading {config.model_name}...")
@@ -1067,7 +1112,7 @@ def train(config: TrainingConfig):
     start_step = 0
     if config.resume_from_checkpoint:
         print_rank0(f"\nResuming from checkpoint: {config.resume_from_checkpoint}")
-        start_step = load_checkpoint_dcp(model, optimizer, scheduler, config.resume_from_checkpoint)
+        start_step = load_checkpoint(model, optimizer, scheduler, config.resume_from_checkpoint)
         print_rank0(f"Resumed from step {start_step}")
 
     # Synchronize all ranks before starting training loop

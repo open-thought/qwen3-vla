@@ -22,7 +22,7 @@ import torchvision.transforms.v2 as transforms
 
 from efficient_batch_loader import RoboTwinDatasetIndex, ZipFileCache, EpisodeMetadata
 from normalization import MultiRobotNormalizer, discretize_normalized_values
-from action_tokenizer import create_action_tokenizer, BaseActionTokenizer
+from action_tokenizer import create_action_tokenizer
 
 
 @dataclass
