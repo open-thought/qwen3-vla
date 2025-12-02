@@ -24,9 +24,14 @@ Example usage:
     # Encode trajectory to tokens
     tokens = tokenizer.encode(t_data, trajectory_data)
 
-    # Decode tokens back to trajectory
-    t_eval = np.linspace(0, 1, 100)
-    reconstructed = tokenizer.decode(tokens, t_eval)
+    # Decode tokens to BSplineTrajectory object
+    trajectory = tokenizer.decode(tokens)
+
+    # Evaluate at any normalized time point(s) in [0, 1]
+    values = trajectory.evaluate(np.array([0.0, 0.5, 1.0]))
+
+    # Or evaluate at a single point
+    value = trajectory(0.5)
 """
 
 import numpy as np
@@ -126,6 +131,99 @@ def bspline_basis_matrix(t_values: np.ndarray, n_control_points: int, degree: in
             basis_matrix[i, j] = bspline_basis(j, degree, t, knots)
 
     return basis_matrix
+
+
+class BSplineTrajectory:
+    """
+    A decoded B-spline trajectory that can be evaluated at any time point in [0, 1].
+
+    This class holds the control points and knot vector for a multi-DoF B-spline
+    trajectory and provides efficient evaluation at arbitrary time points.
+
+    Attributes:
+        control_points: Array of shape (n_dof, n_control_points)
+        n_dof: Number of degrees of freedom
+        n_control_points: Number of control points per DoF
+        degree: B-spline polynomial degree
+        knots: Knot vector
+    """
+
+    def __init__(
+        self,
+        control_points: np.ndarray,
+        degree: int = 4,
+        knots: Optional[np.ndarray] = None
+    ):
+        """
+        Initialize a B-spline trajectory.
+
+        Args:
+            control_points: Array of shape (n_dof, n_control_points)
+            degree: B-spline polynomial degree
+            knots: Optional knot vector. If None, creates a clamped knot vector.
+        """
+        if control_points.ndim == 1:
+            control_points = control_points.reshape(1, -1)
+
+        self.control_points = control_points
+        self.n_dof = control_points.shape[0]
+        self.n_control_points = control_points.shape[1]
+        self.degree = degree
+
+        if knots is None:
+            self.knots = create_clamped_knot_vector(self.n_control_points, degree)
+        else:
+            self.knots = knots
+
+    def evaluate(self, t: float | np.ndarray) -> np.ndarray:
+        """
+        Evaluate the trajectory at given time point(s).
+
+        Args:
+            t: Time/parameter value(s) in [0, 1]. Can be a scalar float, 1D array,
+               or any array-like that will be converted to array.
+
+        Returns:
+            Trajectory values of shape (len(t), n_dof) if t is array-like,
+            or shape (n_dof,) if t is a scalar.
+        """
+        t = np.atleast_1d(np.asarray(t, dtype=np.float64))
+        scalar_input = (t.shape == (1,))
+
+        # Validate time range
+        if np.any(t < 0) or np.any(t > 1):
+            raise ValueError(f"Time values must be in [0, 1], got range [{t.min()}, {t.max()}]")
+
+        basis_matrix = bspline_basis_matrix(t, self.n_control_points, self.degree, self.knots)
+
+        # Evaluate all DoFs: (n_points, n_cp) @ (n_cp, n_dof).T -> need different approach
+        # control_points is (n_dof, n_control_points)
+        # basis_matrix is (n_points, n_control_points)
+        # Result should be (n_points, n_dof)
+        trajectory = basis_matrix @ self.control_points.T
+
+        if scalar_input:
+            return trajectory[0]
+        return trajectory
+
+    def __call__(self, t: float) -> np.ndarray:
+        """
+        Evaluate the trajectory at a single time point.
+
+        Args:
+            t: Time/parameter value in [0, 1]
+
+        Returns:
+            Action values of shape (n_dof,)
+        """
+        return self.evaluate(t)
+
+    def __repr__(self) -> str:
+        return (
+            f"BSplineTrajectory(n_dof={self.n_dof}, "
+            f"n_control_points={self.n_control_points}, "
+            f"degree={self.degree})"
+        )
 
 
 class BSplineTokenizer:
@@ -345,22 +443,21 @@ class BSplineTokenizer:
         control_points = self.fit(t, trajectory)
         return self._control_points_to_tokens(control_points)
 
-    def decode(self, tokens: np.ndarray, t: np.ndarray) -> np.ndarray:
+    def decode(self, tokens: np.ndarray) -> BSplineTrajectory:
         """
-        Decode tokens back to a trajectory.
+        Decode tokens to a BSplineTrajectory object.
 
         Args:
             tokens: Integer token array of shape (n_dof * n_control_points,)
-            t: Time/parameter values to evaluate the trajectory at
 
         Returns:
-            Trajectory array of shape (len(t), n_dof)
+            BSplineTrajectory object that can be evaluated at any time in [0, 1]
         """
         if len(tokens) != self.n_tokens:
             raise ValueError(f"Expected {self.n_tokens} tokens, got {len(tokens)}")
 
         control_points = self._tokens_to_control_points(tokens)
-        return self.evaluate(control_points, t)
+        return BSplineTrajectory(control_points, degree=self.degree, knots=self.knots)
 
     def get_control_points_from_tokens(self, tokens: np.ndarray) -> np.ndarray:
         """
@@ -403,7 +500,8 @@ class BSplineTokenizer:
             t_eval = t
 
         tokens = self.encode(t, trajectory)
-        reconstructed = self.decode(tokens, t_eval)
+        bspline_traj = self.decode(tokens)
+        reconstructed = bspline_traj.evaluate(t_eval)
 
         if t_eval is t or (len(t_eval) == len(t) and np.allclose(t_eval, t)):
             original = trajectory
@@ -526,10 +624,18 @@ if __name__ == "__main__":
         print(f"Token range: [{tokens.min()}, {tokens.max()}]")
         print(f"First 16 tokens: {tokens[:16]}")
 
-        # Decode
+        # Decode to BSplineTrajectory
+        bspline_traj = tokenizer.decode(tokens)
+        print(f"\nDecoded trajectory: {bspline_traj}")
+
+        # Evaluate at multiple points
         t_eval = np.linspace(0, 1, 100)
-        reconstructed = tokenizer.decode(tokens, t_eval)
-        print(f"\nReconstructed shape: {reconstructed.shape}")
+        reconstructed = bspline_traj.evaluate(t_eval)
+        print(f"Evaluated shape: {reconstructed.shape}")
+
+        # Evaluate at a single point using callable interface
+        single_value = bspline_traj(0.5)
+        print(f"Value at t=0.5: {single_value[:3]}... (first 3 DoFs)")
 
         # Compute error
         errors = tokenizer.compute_reconstruction_error(t, trajectory, t_eval)
