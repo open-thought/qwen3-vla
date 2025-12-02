@@ -32,7 +32,8 @@ Usage:
 import numpy as np
 from typing import Optional, List, Tuple
 from collections import deque
-from .bspline_tokenizer import BSplineTokenizer, BSplineTrajectory
+from .bspline_tokenizer import BSplineTokenizer
+from .bspline_trajectory import BSplineTrajectory
 
 
 class BSplineTemporalEnsemble:
