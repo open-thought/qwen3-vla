@@ -7,7 +7,7 @@
 model_name: Qwen/Qwen3-VL-2B-Instruct
 original_vocab_size: 151936
 new_vocab_size: 152193  # 151936 + 257 (BinTokenizer with 257 bins)
-tokenizer_type: bin  # "fast" or "bin"
+tokenizer_type: bin
 n_bins: 257  # Use 257 bins for exact zero reconstruction
 symmetric_delta_norm: true  # Use symmetric normalization (0 maps to exactly 0)
 

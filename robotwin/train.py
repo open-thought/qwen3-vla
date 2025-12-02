@@ -1,7 +1,7 @@
 """
 Training script for Qwen3-VLA on RoboTwin dataset.
 
-Trains a vision-language-action model by extending Qwen3-VL with FAST action tokens.
+Trains a vision-language-action model by extending Qwen3-VL with action tokens.
 """
 
 import argparse
@@ -112,6 +112,10 @@ def create_dataloaders(config: TrainingConfig):
         gripper_closed_threshold=config.gripper_closed_threshold,
         state_dropout_prob=config.state_dropout_prob,
         state_dropout_full_prob=config.state_dropout_full_prob,
+        bspline_n_control_points=config.bspline_n_control_points,
+        bspline_degree=config.bspline_degree,
+        bspline_bounds=config.bspline_bounds,
+        bspline_token_order=config.bspline_token_order,
     )
 
     # Split into train/val
@@ -152,6 +156,10 @@ def create_dataloaders(config: TrainingConfig):
         gripper_closed_threshold=config.gripper_closed_threshold,
         state_dropout_prob=0.0,  # No state dropout during validation
         state_dropout_full_prob=0.0,
+        bspline_n_control_points=config.bspline_n_control_points,
+        bspline_degree=config.bspline_degree,
+        bspline_bounds=config.bspline_bounds,
+        bspline_token_order=config.bspline_token_order,
     )
 
     # Use same indices for validation

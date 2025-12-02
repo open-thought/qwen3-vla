@@ -29,10 +29,10 @@ class VLADataCollator:
         self,
         processor,
         action_token_start: int = 151936,  # First action token ID
-        action_token_end: int = 153983,    # Last action token ID (FAST default: 151936 + 2048 - 1)
+        action_token_end: int = 152190,    # Last action token ID (default: 151936 + 255 - 1)
         add_eot_token: bool = True,        # Add EOT token after action sequence
-        tokenizer_type: str = "fast",      # "fast" or "bin"
-        n_bins: int = 256,                 # Number of bins for BinTokenizer
+        tokenizer_type: str = "bspline",   # "bspline" or "bin"
+        n_bins: int = 255,                 # Number of bins for quantization
         state_reconstruction: bool = False,  # Enable state reconstruction auxiliary task
         state_reconstruction_only_on_dropout: bool = True,  # Only add reconstruction when state was dropped
     ):
@@ -42,8 +42,8 @@ class VLADataCollator:
             action_token_start: First token ID in action vocabulary
             action_token_end: Last token ID in action vocabulary
             add_eot_token: Whether to append EOT token after action sequence
-            tokenizer_type: Type of action tokenizer ("fast" or "bin")
-            n_bins: Number of bins for BinTokenizer (default: 256, use 257 for exact zero)
+            tokenizer_type: Type of action tokenizer ("bspline" or "bin")
+            n_bins: Number of bins for quantization (default: 255 for exact zero)
             state_reconstruction: Enable state reconstruction auxiliary task. When True,
                 appends tokenized state after actions: [actions] -> [EOT] -> [state] -> [EOT]
             state_reconstruction_only_on_dropout: Only add state reconstruction when
@@ -55,10 +55,8 @@ class VLADataCollator:
         self.state_reconstruction = state_reconstruction
         self.state_reconstruction_only_on_dropout = state_reconstruction_only_on_dropout
 
-        # Set token range based on tokenizer type if using defaults
-        if tokenizer_type == "bin" and action_token_end == 153983:
-            # BinTokenizer uses n_bins bins
-            action_token_end = self.ACTION_TOKEN_OFFSET + n_bins - 1
+        # Set token range based on n_bins (both bspline and bin use n_bins tokens)
+        action_token_end = self.ACTION_TOKEN_OFFSET + n_bins - 1
 
         self.action_token_start = action_token_start
         self.action_token_end = action_token_end

@@ -543,20 +543,47 @@ def main():
     parser.add_argument(
         "--tokenizer_type",
         type=str,
-        default="fast",
-        choices=["fast", "bin"],
-        help="Action tokenizer type: 'fast' (compressed) or 'bin' (OpenVLA-style 256 bins)"
+        default="bspline",
+        choices=["bspline", "bin"],
+        help="Action tokenizer type: 'bspline' (smooth trajectory) or 'bin' (OpenVLA-style bins)"
     )
     parser.add_argument(
         "--n_bins",
         type=int,
-        default=256,
-        help="Number of bins for BinTokenizer (default: 256, use 257 for exact zero)"
+        default=255,
+        help="Number of bins for quantization (default: 255 for exact zero with symmetric bounds)"
     )
     parser.add_argument(
         "--symmetric_delta_norm",
         action="store_true",
         help="Use symmetric normalization for delta actions (0 maps to 0)"
+    )
+    # B-spline tokenizer parameters
+    parser.add_argument(
+        "--bspline_n_control_points",
+        type=int,
+        default=8,
+        help="Number of B-spline control points per DoF (default: 8)"
+    )
+    parser.add_argument(
+        "--bspline_degree",
+        type=int,
+        default=4,
+        help="B-spline polynomial degree (default: 4)"
+    )
+    parser.add_argument(
+        "--bspline_bounds",
+        type=float,
+        nargs=2,
+        default=[-1.5, 1.5],
+        help="Bounds for B-spline control point values (default: -1.5 1.5)"
+    )
+    parser.add_argument(
+        "--bspline_token_order",
+        type=str,
+        default="basis_first",
+        choices=["basis_first", "joint_first"],
+        help="B-spline token ordering mode (default: basis_first)"
     )
 
     args = parser.parse_args()
@@ -589,6 +616,10 @@ def main():
         "symmetric_delta_norm": args.symmetric_delta_norm,
         "binarize_gripper": args.binarize_gripper,
         "gripper_threshold": args.gripper_threshold,
+        "bspline_n_control_points": args.bspline_n_control_points,
+        "bspline_degree": args.bspline_degree,
+        "bspline_bounds": tuple(args.bspline_bounds),
+        "bspline_token_order": args.bspline_token_order,
     }
     model = get_model(model_args)
 

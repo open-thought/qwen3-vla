@@ -284,6 +284,10 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         gripper_closed_threshold=config.gripper_closed_threshold,
         state_dropout_prob=config.state_dropout_prob,
         state_dropout_full_prob=config.state_dropout_full_prob,
+        bspline_n_control_points=config.bspline_n_control_points,
+        bspline_degree=config.bspline_degree,
+        bspline_bounds=config.bspline_bounds,
+        bspline_token_order=config.bspline_token_order,
     )
 
     # Split into train/val
@@ -324,6 +328,10 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         gripper_closed_threshold=config.gripper_closed_threshold,
         state_dropout_prob=0.0,
         state_dropout_full_prob=0.0,
+        bspline_n_control_points=config.bspline_n_control_points,
+        bspline_degree=config.bspline_degree,
+        bspline_bounds=config.bspline_bounds,
+        bspline_token_order=config.bspline_token_order,
     )
 
     # Use same indices for validation
@@ -958,6 +966,7 @@ def load_model_for_fsdp(config: TrainingConfig):
         dtype=torch.bfloat16,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
+        attn_implementation="sdpa",  # Use PyTorch's Scaled Dot Product Attention
         # Don't use device_map - FSDP will handle sharding
     )
 

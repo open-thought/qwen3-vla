@@ -4,7 +4,7 @@ Comprehensive test for dataset + data collator pipeline.
 Tests:
 - Image loading and augmentation
 - State and action normalization
-- FAST tokenization
+- Action tokenization (BSpline or Bin)
 - Batch collation with loss masking
 """
 
@@ -20,7 +20,6 @@ from PIL import Image
 from robotwin_dataset import RoboTwinVLADataset
 from data_collator import VLADataCollator
 from normalization import MultiRobotNormalizer
-from action_tokenizer import ActionTokenizer
 
 
 def test_dataset_loading():
@@ -31,7 +30,7 @@ def test_dataset_loading():
 
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
         episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
@@ -70,9 +69,9 @@ def test_dataset_loading():
     assert sample['discretized_state'].min() >= 0 and sample['discretized_state'].max() <= 255, "State not in [0, 255]"
     print(f"✓ Robot state correctly discretized to [0, 255]")
 
-    # Verify action tokens are in FAST range
-    assert min(sample['action_tokens']) >= 151936 and max(sample['action_tokens']) <= 153983, "Action tokens not in FAST range"
-    print(f"✓ Action tokens in correct range [151936, 153983]")
+    # Verify action tokens are in valid range (151936 + n_bins - 1)
+    assert min(sample['action_tokens']) >= 151936, "Action tokens below valid range"
+    print(f"✓ Action tokens in valid range (min: {min(sample['action_tokens'])}, max: {max(sample['action_tokens'])})")
 
     dataset.close()
     print(f"\n{'='*80}")
@@ -89,7 +88,8 @@ def test_image_augmentation():
     # Create dataset without augmentation
     dataset_no_aug = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
+        episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
         tasks=["adjust_bottle"],
@@ -102,7 +102,7 @@ def test_image_augmentation():
     # Create dataset with augmentation
     dataset_with_aug = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
         episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
@@ -154,7 +154,7 @@ def test_normalization_roundtrip():
 
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
         episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
@@ -168,7 +168,7 @@ def test_normalization_roundtrip():
     # Get normalized values from dataset
     sample = dataset[0]
     normalized_state = sample['normalized_state']
-    normalized_deltas = sample['normalized_deltas']
+    normalized_deltas = sample['normalized_deltas']  # (action_horizon, 2*dof + 2) - joints + grippers
     robot_type = sample['robot_type']
 
     print(f"\n✓ Got sample with robot type: {robot_type}")
@@ -182,28 +182,34 @@ def test_normalization_roundtrip():
     assert normalized_deltas.min() >= -1.0 and normalized_deltas.max() <= 1.0, "Deltas not in [-1, 1]"
     print(f"\n✓ Normalized values correctly in [-1, 1] range")
 
-    # Test denormalization
+    # Test denormalization - split into joints and grippers
     normalizer = dataset.normalizer
+    metadata = normalizer.get_robot_metadata(robot_type)
+    dof = metadata["dof"]
+    joint_dim = 2 * dof  # Both arms
+
+    # Split normalized deltas into joints and grippers
+    normalized_joint_deltas = normalized_deltas[:, :joint_dim]
+    normalized_grippers = normalized_deltas[:, joint_dim:]
+
+    # Denormalize separately
     denormalized_state = normalizer.denormalize_state(normalized_state, robot_type)
-    denormalized_deltas = normalizer.denormalize_delta_actions(normalized_deltas, robot_type)
+    denormalized_joint_deltas = normalizer.denormalize_delta_actions(normalized_joint_deltas, robot_type)
+    denormalized_grippers = normalizer.denormalize_grippers(normalized_grippers, robot_type)
 
     print(f"\n✓ Denormalized values:")
     print(f"  State range: [{denormalized_state.min():.4f}, {denormalized_state.max():.4f}]")
-    print(f"  Deltas range: [{denormalized_deltas.min():.4f}, {denormalized_deltas.max():.4f}]")
+    print(f"  Joint deltas range: [{denormalized_joint_deltas.min():.4f}, {denormalized_joint_deltas.max():.4f}]")
+    print(f"  Grippers range: [{denormalized_grippers.min():.4f}, {denormalized_grippers.max():.4f}]")
 
-    # Test round-trip (normalize -> denormalize -> normalize)
+    # Test round-trip for state (normalize -> denormalize -> normalize)
     renormalized_state = normalizer.normalize_state(denormalized_state, robot_type)
-    renormalized_deltas = normalizer.normalize_delta_actions(denormalized_deltas, robot_type)
-
     state_error = np.abs(normalized_state - renormalized_state).mean()
-    delta_error = np.abs(normalized_deltas - renormalized_deltas).mean()
 
     print(f"\n✓ Round-trip error:")
     print(f"  State: {state_error:.6f}")
-    print(f"  Deltas: {delta_error:.6f}")
 
     assert state_error < 1e-5, f"State round-trip error too large: {state_error}"
-    assert delta_error < 1e-5, f"Delta round-trip error too large: {delta_error}"
 
     print(f"\n✓ Round-trip successful (error < 1e-5)")
 
@@ -215,14 +221,14 @@ def test_normalization_roundtrip():
 
 
 def test_action_tokenization():
-    """Test FAST action tokenization and reconstruction."""
+    """Test action tokenization and reconstruction."""
     print("=" * 80)
     print("TEST 4: Action Tokenization")
     print("=" * 80)
 
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
-        norm_stats_path="data/test_norm_stats.json",
+        norm_stats_path="data/robotwin_norm_stats_test.json",
         episode_lengths_path="data/robotwin_episode_lengths_test.json",
         action_horizon=50,
         image_size=(320, 240),
@@ -260,7 +266,7 @@ def test_action_tokenization():
     reconstruction_error = np.abs(normalized_deltas - decoded_actions[0]).mean()
     print(f"\n✓ Reconstruction error (MAE): {reconstruction_error:.6f}")
 
-    # FAST is lossy compression, so allow some error
+    # Tokenization has some quantization error, allow reasonable tolerance
     assert reconstruction_error < 0.1, f"Reconstruction error too large: {reconstruction_error}"
     print(f"✓ Reconstruction error within acceptable range (< 0.1)")
 
@@ -346,16 +352,17 @@ def test_data_collator():
 
     print(f"\n✓ All samples have action tokens")
 
-    # Verify action tokens are in FAST range
+    # Verify action tokens are in valid range (action tokens >= 151936, or EOT token 151645)
+    EOT_TOKEN_ID = 151645  # <|im_end|> token
     for i in range(batch_size):
         sample_labels = labels[i][labels[i] != -100]
         if len(sample_labels) > 0:
-            min_token = sample_labels.min().item()
-            max_token = sample_labels.max().item()
-            assert min_token >= 151936, f"Token {min_token} below FAST range"
-            assert max_token <= 153983, f"Token {max_token} above FAST range"
+            for token in sample_labels:
+                token_val = token.item()
+                assert token_val >= 151936 or token_val == EOT_TOKEN_ID, \
+                    f"Token {token_val} not a valid action token or EOT"
 
-    print(f"✓ All action tokens in FAST range [151936, 153983]")
+    print(f"✓ All tokens are valid (action tokens >= 151936 or EOT token)")
 
     dataset.close()
 

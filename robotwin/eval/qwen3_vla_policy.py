@@ -2,7 +2,7 @@
 Qwen3-VLA Policy for RoboTwin Evaluation.
 
 Implements the RoboTwin policy interface for evaluating fine-tuned Qwen3-VL models
-with FAST action tokenization.
+with B-spline or Bin action tokenization.
 """
 
 import sys
@@ -51,17 +51,22 @@ class Qwen3VLAPolicy:
         action_horizon: int = 16,
         robot_type: str = "aloha-agilex",
         device: str = "cuda:0",
-        max_new_tokens: int = 250,  # BinTokenizer needs 224 tokens for 16x14 actions
+        max_new_tokens: int = 250,  # BSpline with 8 control points x 14 dims = 112 tokens
         debug_timing: bool = True,  # Print generation timing info
         debug_actions: bool = False,  # Print decoded action values
         temperature: float = 0.6,  # Sampling temperature (0 for greedy)
         top_p: float = 0.95,  # Nucleus sampling top-p
-        tokenizer_type: str = "fast",  # "fast" or "bin"
-        n_bins: int = 256,  # Number of bins for BinTokenizer (use 257 for exact zero)
+        tokenizer_type: str = "bspline",  # "bspline" or "bin"
+        n_bins: int = 255,  # Number of bins for quantization (255 for exact zero)
         symmetric_delta_norm: bool = False,  # Use symmetric normalization (0 maps to 0)
         execute_steps: int = None,  # Default execute steps (None = full action_horizon)
         binarize_gripper: bool = False,  # Binarize gripper actions to 0 or 1
         gripper_threshold: float = 0.5,  # Threshold for gripper binarization
+        # B-spline tokenizer parameters
+        bspline_n_control_points: int = 8,
+        bspline_degree: int = 4,
+        bspline_bounds: tuple[float, float] = (-1.0, 1.0),
+        bspline_token_order: str = "basis_first",
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -77,13 +82,17 @@ class Qwen3VLAPolicy:
             debug_actions: Print decoded action values
             temperature: Sampling temperature (0 for greedy decoding)
             top_p: Nucleus sampling top-p value
-            tokenizer_type: Type of action tokenizer ("fast" or "bin")
-            n_bins: Number of bins for BinTokenizer (default: 256, use 257 for exact zero)
+            tokenizer_type: Type of action tokenizer ("bspline" or "bin")
+            n_bins: Number of bins for quantization (default: 255 for exact zero)
             symmetric_delta_norm: Use symmetric normalization for delta actions (0 maps to 0)
             execute_steps: Default number of steps to decode/execute. If None, uses full action_horizon.
                           For BinTokenizer, this limits tokens to execute_steps * action_dim.
             binarize_gripper: If True, binarize gripper actions to 0 (closed) or 1 (open)
             gripper_threshold: Threshold for binarization (default 0.5). Values >= threshold become 1, else 0.
+            bspline_n_control_points: Number of B-spline control points per DoF (default: 8)
+            bspline_degree: B-spline polynomial degree (default: 4)
+            bspline_bounds: (lower, upper) bounds for control point values
+            bspline_token_order: Token ordering mode ("basis_first" or "joint_first")
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -108,18 +117,19 @@ class Qwen3VLAPolicy:
 
         print(f"Loading Qwen3-VLA from {checkpoint_path}...")
 
-        # Load model
+        # Load model with SDPA attention for better performance
         self.model = AutoModelForImageTextToText.from_pretrained(
             checkpoint_path,
             dtype=torch.bfloat16,
             device_map=device,
             trust_remote_code=True,
+            attn_implementation="sdpa",
         )
         self.model.eval()
         print("model type", type(self.model))
 
         # Load processor from base model (checkpoint tokenizer files may be incomplete)
-        # Use the base Qwen3-VL-2B-Instruct processor
+        # The processor is the same for 2B and 4B models
         base_model_name = "Qwen/Qwen3-VL-2B-Instruct"
         self.processor = AutoProcessor.from_pretrained(
             base_model_name,
@@ -128,7 +138,14 @@ class Qwen3VLAPolicy:
 
         # Load action tokenizer
         print(f"Loading {tokenizer_type.upper()} action tokenizer...")
-        self.action_tokenizer = create_action_tokenizer(tokenizer_type, n_bins=n_bins)
+        self.action_tokenizer = create_action_tokenizer(
+            tokenizer_type,
+            n_bins=n_bins,
+            n_control_points=bspline_n_control_points,
+            degree=bspline_degree,
+            bounds=bspline_bounds,
+            token_order=bspline_token_order,
+        )
         self.action_token_start, self.action_token_end = self.action_tokenizer.get_token_range()
 
         # Load normalizer
@@ -567,10 +584,14 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
             - device: CUDA device (default: "cuda:0")
             - temperature: Sampling temperature (default: 0.6, 0 for greedy)
             - top_p: Nucleus sampling top-p (default: 0.95)
-            - tokenizer_type: Action tokenizer type ("fast" or "bin", default: "fast")
-            - n_bins: Number of bins for BinTokenizer (default: 256, use 257 for exact zero)
+            - tokenizer_type: Action tokenizer type ("bspline" or "bin", default: "bspline")
+            - n_bins: Number of bins for quantization (default: 255 for exact zero)
             - symmetric_delta_norm: Use symmetric normalization (default: False)
             - execute_steps: Default steps to decode/execute (default: None = full horizon)
+            - bspline_n_control_points: B-spline control points per DoF (default: 8)
+            - bspline_degree: B-spline polynomial degree (default: 4)
+            - bspline_bounds: Bounds for control point values (default: (-1.0, 1.0))
+            - bspline_token_order: Token ordering mode (default: "basis_first")
 
     Returns:
         Qwen3VLAPolicy instance
@@ -591,12 +612,16 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     debug_actions = usr_args.get("debug_actions", False)
     temperature = usr_args.get("temperature", 0.6)
     top_p = usr_args.get("top_p", 0.95)
-    tokenizer_type = usr_args.get("tokenizer_type", "fast")
-    n_bins = usr_args.get("n_bins", 256)
+    tokenizer_type = usr_args.get("tokenizer_type", "bspline")
+    n_bins = usr_args.get("n_bins", 255)
     symmetric_delta_norm = usr_args.get("symmetric_delta_norm", False)
     execute_steps = usr_args.get("execute_steps", None)
     binarize_gripper = usr_args.get("binarize_gripper", False)
     gripper_threshold = usr_args.get("gripper_threshold", 0.5)
+    bspline_n_control_points = usr_args.get("bspline_n_control_points", 8)
+    bspline_degree = usr_args.get("bspline_degree", 4)
+    bspline_bounds = usr_args.get("bspline_bounds", (-1.0, 1.0))
+    bspline_token_order = usr_args.get("bspline_token_order", "basis_first")
 
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
@@ -613,6 +638,10 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         execute_steps=execute_steps,
         binarize_gripper=binarize_gripper,
         gripper_threshold=gripper_threshold,
+        bspline_n_control_points=bspline_n_control_points,
+        bspline_degree=bspline_degree,
+        bspline_bounds=bspline_bounds,
+        bspline_token_order=bspline_token_order,
     )
 
     return _policy_instance

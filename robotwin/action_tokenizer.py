@@ -2,7 +2,7 @@
 Action tokenizers for VLA training.
 
 Supports two tokenization methods:
-1. FAST (Frequency Action Space Tokenizer) - compressed representation using pre-trained tokenizer
+1. BSpline - B-spline based tokenizer for smooth trajectory encoding
 2. Bin (OpenVLA-style) - simple uniform discretization, one token per action dimension
 
 Both tokenizers map to extended vocabulary tokens (starting at VOCAB_OFFSET).
@@ -13,6 +13,8 @@ from typing import Literal
 
 import numpy as np
 import torch
+
+from bspline_tokenizer import BSplineTokenizer
 
 
 class BaseActionTokenizer(ABC):
@@ -60,9 +62,7 @@ class BinTokenizer(BaseActionTokenizer):
     Discretizes each action dimension independently into N bins.
     One token per action dimension, so action_horizon * action_dim tokens total.
 
-    This is simpler than FAST but produces more tokens.
-
-    For exact zero reconstruction, use n_bins=257 (odd number) so that
+    For exact zero reconstruction, use n_bins=255 or 257 (odd number) so that
     one bin center falls exactly at 0.
     """
 
@@ -225,40 +225,68 @@ class BinTokenizer(BaseActionTokenizer):
         return (self.VOCAB_OFFSET, self.VOCAB_OFFSET + self.n_bins - 1)
 
 
-class FASTTokenizer(BaseActionTokenizer):
+class BSplineActionTokenizer(BaseActionTokenizer):
     """
-    Wrapper for FAST action tokenizer.
+    Wrapper for B-spline action tokenizer.
 
-    Encodes normalized delta actions (in [-1, 1] range) into discrete tokens.
-    Uses pre-trained universal tokenizer from physical-intelligence.
+    Encodes normalized delta actions (in [-1, 1] range) into discrete tokens
+    using B-spline trajectory representation.
 
-    FAST uses compression, so output length varies and is typically much shorter
-    than action_horizon * action_dim.
+    The B-spline tokenizer fits smooth trajectories to the action sequence
+    and encodes the control points as tokens. This provides a compact
+    representation with smooth interpolation.
     """
 
-    # FAST vocab size
-    FAST_VOCAB_SIZE = 2048
-
-    def __init__(self, model_name: str = "physical-intelligence/fast"):
+    def __init__(
+        self,
+        n_control_points: int = 8,
+        degree: int = 4,
+        bounds: tuple[float, float] = (-1.0, 1.0),
+        n_bins: int = 255,
+        token_order: Literal['basis_first', 'joint_first'] = 'basis_first',
+    ):
         """
-        Initialize action tokenizer with pre-trained FAST model.
+        Initialize B-spline action tokenizer.
 
         Args:
-            model_name: HuggingFace model name for pre-trained FAST tokenizer
+            n_control_points: Number of B-spline control points per DoF
+            degree: B-spline polynomial degree
+            bounds: (lower, upper) bounds for control point values
+            n_bins: Number of quantization bins (255 recommended for exact zero with symmetric bounds)
+            token_order: Order of tokens in output:
+                - 'basis_first': [cp0_j0, cp0_j1, ..., cp0_jN, cp1_j0, ...]
+                - 'joint_first': [cp0_j0, cp1_j0, ..., cpM_j0, cp0_j1, ...]
         """
-        from transformers import AutoProcessor
+        self.n_control_points = n_control_points
+        self.degree = degree
+        self.bounds = bounds
+        self.n_bins = n_bins
+        self.token_order = token_order
 
-        # Load pre-trained FAST processor
-        self.processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=True
-        )
+        # Vocab size is the number of bins
+        self._vocab_size = n_bins
 
-        self._vocab_size = self.FAST_VOCAB_SIZE
+        # We'll create the actual tokenizer lazily since n_dof depends on input
+        self._tokenizers: dict[int, BSplineTokenizer] = {}
 
-        print(f"Loaded FAST tokenizer from {model_name}")
-        print(f"  Vocab size: {self._vocab_size}")
-        print(f"  Token range: [{self.VOCAB_OFFSET}, {self.VOCAB_OFFSET + self._vocab_size - 1}]")
+        print(f"Initialized BSplineActionTokenizer")
+        print(f"  Control points: {n_control_points}, Degree: {degree}")
+        print(f"  Bounds: {bounds}, Bins: {n_bins}")
+        print(f"  Token order: {token_order}")
+        print(f"  Token range: [{self.VOCAB_OFFSET}, {self.VOCAB_OFFSET + n_bins - 1}]")
+
+    def _get_tokenizer(self, n_dof: int) -> BSplineTokenizer:
+        """Get or create a BSplineTokenizer for the given number of DoFs."""
+        if n_dof not in self._tokenizers:
+            self._tokenizers[n_dof] = BSplineTokenizer(
+                n_dof=n_dof,
+                n_control_points=self.n_control_points,
+                degree=self.degree,
+                bounds=self.bounds,
+                n_bins=self.n_bins,
+                token_order=self.token_order,
+            )
+        return self._tokenizers[n_dof]
 
     @property
     def vocab_size(self) -> int:
@@ -266,54 +294,55 @@ class FASTTokenizer(BaseActionTokenizer):
 
     def encode(
         self,
-        normalized_delta_actions: np.ndarray | torch.Tensor,
+        normalized_actions: np.ndarray | torch.Tensor,
         return_torch: bool = False
     ) -> list[list[int]] | torch.Tensor:
         """
-        Encode normalized delta actions into discrete tokens.
+        Encode normalized actions into discrete tokens.
 
         Args:
-            normalized_delta_actions: Normalized delta actions in [-1, 1] range
-                Shape: (batch, action_horizon, 2*dof) or (action_horizon, 2*dof)
+            normalized_actions: Normalized actions in [-1, 1] range
+                Shape: (batch, action_horizon, action_dim) or (action_horizon, action_dim)
             return_torch: If True, return torch.Tensor instead of list
 
         Returns:
             Token sequences with vocab offset applied
-            - If return_torch=False: list of token lists (length may vary per sample)
-            - If return_torch=True: padded tensor of shape (batch, max_seq_len)
         """
         # Convert to numpy if needed
-        if isinstance(normalized_delta_actions, torch.Tensor):
-            normalized_delta_actions = normalized_delta_actions.cpu().numpy()
+        if isinstance(normalized_actions, torch.Tensor):
+            normalized_actions = normalized_actions.cpu().numpy()
 
         # Ensure 3D: (batch, action_horizon, action_dim)
-        if normalized_delta_actions.ndim == 2:
-            normalized_delta_actions = normalized_delta_actions[None, :]
+        if normalized_actions.ndim == 2:
+            normalized_actions = normalized_actions[None, :]
 
-        # Encode using FAST processor
-        tokens = self.processor(normalized_delta_actions)
+        batch_size, action_horizon, action_dim = normalized_actions.shape
 
-        # Apply vocabulary offset to map to extended vocab space
+        # Get tokenizer for this action_dim
+        tokenizer = self._get_tokenizer(action_dim)
+
+        # Create normalized time values for B-spline fitting
+        t = np.linspace(0, 1, action_horizon)
+
+        # Encode each sample in the batch
         tokens_with_offset = []
-        for token_seq in tokens:
-            # Filter out special tokens (if any) and apply offset
-            tokens_with_offset.append([t + self.VOCAB_OFFSET for t in token_seq])
+        for i in range(batch_size):
+            # Encode trajectory to tokens
+            tokens = tokenizer.encode(t, normalized_actions[i])
+            # Apply vocabulary offset
+            tokens_with_offset.append([int(tok) + self.VOCAB_OFFSET for tok in tokens])
 
         if return_torch:
-            # Convert to padded tensor
+            # All sequences should have the same length for BSpline tokenizer
+            # (n_control_points * action_dim tokens)
             max_len = max(len(seq) for seq in tokens_with_offset)
-            batch_size = len(tokens_with_offset)
-
-            # Use vocab offset as padding token (first FAST token)
             padded_tokens = torch.full(
                 (batch_size, max_len),
                 self.VOCAB_OFFSET,
                 dtype=torch.long
             )
-
             for i, seq in enumerate(tokens_with_offset):
                 padded_tokens[i, :len(seq)] = torch.tensor(seq, dtype=torch.long)
-
             return padded_tokens
 
         return tokens_with_offset
@@ -325,59 +354,75 @@ class FASTTokenizer(BaseActionTokenizer):
         action_dim: int
     ) -> np.ndarray:
         """
-        Decode tokens back to normalized delta actions.
+        Decode tokens back to normalized actions.
 
         Args:
             tokens: Token sequences with vocab offset
-                - list of token lists, or
-                - tensor of shape (batch, seq_len)
             action_horizon: Number of timesteps in action chunk
-            action_dim: Action dimension (2*dof for dual-arm robots)
+            action_dim: Action dimension
 
         Returns:
-            Normalized delta actions in [-1, 1] range
+            Normalized actions in [-1, 1] range
             Shape: (batch, action_horizon, action_dim)
         """
         # Convert tensor to list if needed
         if isinstance(tokens, torch.Tensor):
-            # Remove padding (tokens equal to VOCAB_OFFSET)
             tokens_list = []
             for seq in tokens:
                 valid_tokens = seq[seq >= self.VOCAB_OFFSET].tolist()
                 tokens_list.append(valid_tokens)
             tokens = tokens_list
 
-        # Remove vocabulary offset
-        tokens_no_offset = []
-        for token_seq in tokens:
-            tokens_no_offset.append([t - self.VOCAB_OFFSET for t in token_seq])
+        # Get tokenizer for this action_dim
+        tokenizer = self._get_tokenizer(action_dim)
 
-        # Decode using FAST processor
-        decoded_actions = self.processor.decode(
-            tokens_no_offset,
-            time_horizon=action_horizon,
-            action_dim=action_dim
-        )
+        # Expected number of tokens
+        expected_tokens = self.n_control_points * action_dim
+
+        # Decode each sample
+        batch_size = len(tokens)
+        decoded_actions = np.zeros((batch_size, action_horizon, action_dim), dtype=np.float32)
+
+        # Create evaluation time points
+        t_eval = np.linspace(0, 1, action_horizon)
+
+        for i, token_seq in enumerate(tokens):
+            # Remove vocabulary offset
+            tokens_no_offset = np.array([t - self.VOCAB_OFFSET for t in token_seq], dtype=np.int32)
+
+            # Handle token length mismatch
+            if len(tokens_no_offset) < expected_tokens:
+                # Pad with center bin value (should map to 0)
+                center_bin = self.n_bins // 2
+                tokens_no_offset = np.concatenate([
+                    tokens_no_offset,
+                    np.full(expected_tokens - len(tokens_no_offset), center_bin, dtype=np.int32)
+                ])
+            elif len(tokens_no_offset) > expected_tokens:
+                tokens_no_offset = tokens_no_offset[:expected_tokens]
+
+            # Decode to BSplineTrajectory and evaluate
+            trajectory = tokenizer.decode(tokens_no_offset)
+            decoded_actions[i] = trajectory.evaluate(t_eval)
 
         return decoded_actions
 
     def get_token_range(self) -> tuple[int, int]:
-        """
-        Get the range of token IDs used by FAST.
-
-        Returns:
-            Tuple of (min_token_id, max_token_id) inclusive
-        """
+        """Get the range of token IDs used."""
         return (self.VOCAB_OFFSET, self.VOCAB_OFFSET + self._vocab_size - 1)
 
-
-# Backward compatibility alias
-ActionTokenizer = FASTTokenizer
+    def get_num_tokens(self, action_dim: int) -> int:
+        """Get the number of tokens for a given action dimension."""
+        return self.n_control_points * action_dim
 
 
 def create_action_tokenizer(
-    tokenizer_type: Literal["fast", "bin"] = "fast",
-    n_bins: int = 256,
+    tokenizer_type: Literal["bspline", "bin"] = "bspline",
+    n_bins: int = 255,
+    n_control_points: int = 8,
+    degree: int = 4,
+    bounds: tuple[float, float] = (-1.0, 1.0),
+    token_order: Literal['basis_first', 'joint_first'] = 'basis_first',
     **kwargs
 ) -> BaseActionTokenizer:
     """
@@ -385,21 +430,32 @@ def create_action_tokenizer(
 
     Args:
         tokenizer_type: Type of tokenizer to create
-            - "fast": FAST tokenizer (compressed, variable-length output)
+            - "bspline": B-spline tokenizer (smooth trajectory encoding)
             - "bin": Simple bin tokenizer (OpenVLA-style, fixed-length output)
-        n_bins: Number of bins for BinTokenizer (default: 256).
-                Use 257 for exact zero reconstruction (bin center at 0).
+        n_bins: Number of bins for quantization (default: 255).
+                Use 255 for exact zero reconstruction with symmetric bounds.
+        n_control_points: Number of B-spline control points (for bspline tokenizer)
+        degree: B-spline polynomial degree (for bspline tokenizer)
+        bounds: (lower, upper) bounds for values (for bspline tokenizer)
+        token_order: Token ordering mode (for bspline tokenizer)
         **kwargs: Additional arguments passed to the tokenizer constructor
 
     Returns:
         Action tokenizer instance
     """
-    if tokenizer_type == "fast":
-        return FASTTokenizer(**kwargs)
+    if tokenizer_type == "bspline":
+        return BSplineActionTokenizer(
+            n_control_points=n_control_points,
+            degree=degree,
+            bounds=bounds,
+            n_bins=n_bins,
+            token_order=token_order,
+            **kwargs
+        )
     elif tokenizer_type == "bin":
         return BinTokenizer(n_bins=n_bins, **kwargs)
     else:
-        raise ValueError(f"Unknown tokenizer type: {tokenizer_type}. Must be 'fast' or 'bin'.")
+        raise ValueError(f"Unknown tokenizer type: {tokenizer_type}. Must be 'bspline' or 'bin'.")
 
 
 def _test_tokenizer(tokenizer: BaseActionTokenizer, name: str, action_horizon: int = 16, action_dim: int = 14):
@@ -408,10 +464,20 @@ def _test_tokenizer(tokenizer: BaseActionTokenizer, name: str, action_horizon: i
     print(f"Testing {name}")
     print(f"{'='*60}")
 
-    # Create synthetic normalized actions
+    # Create synthetic normalized actions (smooth trajectories for better B-spline fit)
     batch_size = 4
     np.random.seed(42)
-    actions = np.random.rand(batch_size, action_horizon, action_dim).astype(np.float32) * 2 - 1  # [-1, 1]
+
+    # Generate smooth trajectories using sine waves
+    t = np.linspace(0, 1, action_horizon)
+    actions = np.zeros((batch_size, action_horizon, action_dim), dtype=np.float32)
+    for b in range(batch_size):
+        for d in range(action_dim):
+            freq = np.random.uniform(0.5, 2)
+            phase = np.random.uniform(0, 2 * np.pi)
+            amplitude = np.random.uniform(0.3, 0.8)
+            offset = np.random.uniform(-0.2, 0.2)
+            actions[b, :, d] = amplitude * np.sin(2 * np.pi * freq * t + phase) + offset
 
     print(f"\nInput actions shape: {actions.shape}")
     print(f"Input actions range: [{actions.min():.4f}, {actions.max():.4f}]")
@@ -434,8 +500,8 @@ def _test_tokenizer(tokenizer: BaseActionTokenizer, name: str, action_horizon: i
 
     # Expected error thresholds
     # BinTokenizer: ~0.004 (256 bins over [-1,1] = bin width 0.0078)
-    # FASTTokenizer: varies, typically < 0.1
-    threshold = 0.01 if name == "BinTokenizer" else 0.1
+    # BSplineActionTokenizer: varies based on smoothness, typically < 0.05 for smooth trajectories
+    threshold = 0.01 if name == "BinTokenizer" else 0.05
 
     if reconstruction_error < threshold:
         print(f"✓ Reconstruction error within acceptable range (< {threshold})")
@@ -457,16 +523,21 @@ def test_action_tokenizers():
     bin_tokenizer = BinTokenizer(n_bins=256)
     bin_error = _test_tokenizer(bin_tokenizer, "BinTokenizer", action_horizon, action_dim)
 
-    # Test FASTTokenizer
-    fast_tokenizer = FASTTokenizer()
-    fast_error = _test_tokenizer(fast_tokenizer, "FASTTokenizer", action_horizon, action_dim)
+    # Test BSplineActionTokenizer
+    bspline_tokenizer = BSplineActionTokenizer(
+        n_control_points=8,
+        degree=4,
+        bounds=(-1.0, 1.0),
+        n_bins=255,
+    )
+    bspline_error = _test_tokenizer(bspline_tokenizer, "BSplineActionTokenizer", action_horizon, action_dim)
 
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"BinTokenizer:  MAE = {bin_error:.6f}, tokens = {action_horizon * action_dim} (fixed)")
-    print(f"FASTTokenizer: MAE = {fast_error:.6f}, tokens = variable (compressed)")
+    print(f"BinTokenizer:          MAE = {bin_error:.6f}, tokens = {action_horizon * action_dim} (fixed)")
+    print(f"BSplineActionTokenizer: MAE = {bspline_error:.6f}, tokens = {bspline_tokenizer.get_num_tokens(action_dim)} (fixed)")
     print(f"\n✓ All tokenizer tests completed!")
 
 

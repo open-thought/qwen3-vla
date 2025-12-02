@@ -5,12 +5,17 @@
 # Base model: Qwen3-VL-4B-Instruct
 
 # Model configuration
-model_name: Qwen/Qwen3-VL-4B-Instruct
+#model_name: Qwen/Qwen3-VL-4B-Instruct
+model_name: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-full-h8-bin-sym-4b/step_45000/
 original_vocab_size: 151936
-new_vocab_size: 152193  # 151936 + 257 (BinTokenizer with 257 bins)
+new_vocab_size: 152256 # 151936 + 257 = 152193 (BinTokenizer with 257 bins) rounded up to next 64
 tokenizer_type: bin
 n_bins: 257  # Use 257 bins for exact zero reconstruction
 symmetric_delta_norm: true  # Use symmetric normalization (0 maps to exactly 0)
+
+use_fsdp: true
+fsdp_sharding_strategy: NO_SHARD  # Use DDP - fastest for systems without P2P/NVLink
+fsdp_activation_checkpointing: true
 
 # Gripper binarization (converts continuous gripper values to binary 0/1)
 # Uses forward-looking relabeling for intermediate values
@@ -21,8 +26,8 @@ gripper_closed_threshold: 0.3  # Values < this are considered closed (0.0)
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_h8.json
-episode_lengths_path: data/robotwin_episode_lengths.json
-valid_timesteps_path: data/robotwin_valid_timesteps_h8.json
+episode_lengths_path: data/robotwin_episode_lengths_stack_blocks_two.json
+valid_timesteps_path: data/robotwin_valid_timesteps_stack_blocks_two.json
 action_horizon: 8
 pad_action_horizon: false  # Use variable-length sequences for better data quality
 image_size:
@@ -32,8 +37,11 @@ image_size:
 # Data filtering - Use aloha-agilex robot type, variants, and tasks (null = no filtering)
 robot_types:
 - aloha-agilex
-variants: null
-tasks: null
+variants:
+- clean_1k
+#- perturbed_1k
+tasks:
+- stack_blocks_two
 
 # Image augmentation
 enable_augmentation: true
@@ -55,13 +63,14 @@ state_reconstruction_only_on_dropout: true  # Only add reconstruction when state
 validation_split: 0.05
 
 # Training hyperparameters
-batch_size: 2  # Reduced from 7 due to larger model size
-gradient_accumulation_steps: 8  # Increased to maintain effective batch size
+batch_size: 4
+gradient_accumulation_steps: 4  # With 8-bit optimizer and no_sync, we have memory for accumulation
 learning_rate: 2.0e-05
 weight_decay: 0.01
 max_grad_norm: 1.0
 max_steps: 100000
 warmup_steps: 1000
+use_8bit_optimizer: true  # 8-bit Adam: 4x less optimizer memory (32GB -> 8GB)
 
 # LoRA configuration
 use_lora: false
@@ -75,20 +84,20 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-full-h8-bin-sym-4b
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-vla-robotwin-aloha-h8-stack_two
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100
 
 # DataLoader configuration
-num_workers: 8
+num_workers: 4
 prefetch_factor: 2
 
 # WandB logging
 enable_wandb: true
 wandb_project: qwen3-vla-robotwin
 wandb_entity: null
-wandb_run_name: aloha-h8-bin-sym-4b-state-dropout
+wandb_run_name: aloha-h8-stack_two
 wandb_log_interval: 50
 
 # Mixed precision training (always uses bfloat16)

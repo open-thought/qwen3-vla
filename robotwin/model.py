@@ -1,7 +1,7 @@
 """
 Qwen3-VL model extended with action tokens for VLA training.
 
-Extends the Qwen3-VL vocabulary with action tokens (FAST or Bin tokenizer)
+Extends the Qwen3-VL vocabulary with action tokens (BSpline or Bin tokenizer)
 and provides training utilities for vision-language-action learning.
 """
 
@@ -20,7 +20,7 @@ class Qwen3VLAModel(nn.Module):
     Qwen3-VL model extended for Vision-Language-Action tasks.
 
     Key features:
-    - Extended vocabulary with action tokens (FAST: +2048, Bin: +256)
+    - Extended vocabulary with action tokens (original_vocab_size + n_bins)
     - New embeddings initialized with mean of existing embeddings
     - Supports LoRA fine-tuning
     - Custom loss computation (only on action tokens)
@@ -32,7 +32,7 @@ class Qwen3VLAModel(nn.Module):
     def __init__(
         self,
         model_name: str = "Qwen/Qwen3-VL-2B-Instruct",
-        new_vocab_size: int = 153984,  # 151936 + 2048 (FAST) or 151936 + 256 (Bin)
+        new_vocab_size: int = 152192,  # 151936 + 255 (default for BSpline/Bin), rounded to 64
         device_map: Optional[str] = "cuda:0",
         use_lora: bool = False,
         lora_r: int = 16,

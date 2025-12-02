@@ -1,35 +1,35 @@
 """
 Full pipeline test for action tokenization with grippers.
 
-Tests the complete roundtrip for both FAST and BinTokenizer:
+Tests the complete roundtrip for both BSpline and BinTokenizer:
 1. Dataset extracts delta joints + absolute grippers
 2. Normalizes and concatenates to 14-dim actions
-3. Tokenizes the normalized actions (FAST or Bin)
+3. Tokenizes the normalized actions (BSpline or Bin)
 4. Detokenizes back to normalized actions
 5. Splits and denormalizes joints and grippers separately
 6. Verifies reconstruction matches original (within tokenizer compression tolerance)
 
-Supports testing with symmetric normalization (n_bins=257) for exact zero reconstruction.
+Supports testing with symmetric normalization (n_bins=255) for exact zero reconstruction.
 """
 
 import numpy as np
 import torch
 
 from robotwin_dataset import RoboTwinVLADataset
-from action_tokenizer import create_action_tokenizer, FASTTokenizer, BinTokenizer
+from action_tokenizer import create_action_tokenizer, BSplineActionTokenizer, BinTokenizer
 from normalization import MultiRobotNormalizer
 
 
 def test_full_action_pipeline(
-    tokenizer_type: str = "fast",
-    n_bins: int = 256,
+    tokenizer_type: str = "bspline",
+    n_bins: int = 255,
     symmetric_delta_norm: bool = False,
 ):
     """Test the complete action tokenization pipeline including grippers.
 
     Args:
-        tokenizer_type: "fast" or "bin"
-        n_bins: Number of bins for BinTokenizer (256 legacy, 257 for exact zero)
+        tokenizer_type: "bspline" or "bin"
+        n_bins: Number of bins for tokenizer (255 for exact zero with symmetric bounds)
         symmetric_delta_norm: Use symmetric normalization for delta actions
     """
     print("=" * 80)
@@ -181,17 +181,17 @@ def test_full_action_pipeline(
     print("\n12. Running assertions...")
 
     # Set error thresholds based on tokenizer type and normalization mode
-    # FAST has compression loss, Bin is more precise (256 bins = ~0.008 bin width)
+    # BSpline has some fitting error, Bin is more precise (255 bins = ~0.008 bin width)
     if tokenizer_type == "bin":
-        if symmetric_delta_norm and n_bins == 257:
-            # Symmetric + 257 bins should have minimal error
+        if symmetric_delta_norm and n_bins == 255:
+            # Symmetric + 255 bins should have minimal error
             joint_threshold = 0.015
             gripper_threshold = 0.015
         else:
             joint_threshold = 0.02  # BinTokenizer is more precise
             gripper_threshold = 0.02
     else:
-        joint_threshold = 0.1  # FAST compression has more loss
+        joint_threshold = 0.1  # BSpline has some fitting error for non-smooth trajectories
         gripper_threshold = 0.1
 
     # Joint errors should be small relative to typical delta magnitudes
@@ -227,15 +227,15 @@ def test_full_action_pipeline(
 
 
 def test_multiple_samples(
-    tokenizer_type: str = "fast",
-    n_bins: int = 256,
+    tokenizer_type: str = "bspline",
+    n_bins: int = 255,
     symmetric_delta_norm: bool = False,
 ):
     """Test pipeline on multiple samples to get statistics.
 
     Args:
-        tokenizer_type: "fast" or "bin"
-        n_bins: Number of bins for BinTokenizer (256 legacy, 257 for exact zero)
+        tokenizer_type: "bspline" or "bin"
+        n_bins: Number of bins for tokenizer (255 for exact zero with symmetric bounds)
         symmetric_delta_norm: Use symmetric normalization for delta actions
     """
     mode_str = "symmetric" if symmetric_delta_norm else "legacy"
@@ -327,47 +327,47 @@ def test_multiple_samples(
 
 
 def test_both_tokenizers():
-    """Test both FAST and Bin tokenizers and compare results."""
+    """Test both BSpline and Bin tokenizers and compare results."""
     print("\n" + "=" * 80)
-    print("COMPARING FAST VS BIN TOKENIZERS")
+    print("COMPARING BSPLINE VS BIN TOKENIZERS")
     print("=" * 80)
 
     results = {}
 
-    # Test FAST tokenizer
-    print("\n>>> Testing FAST tokenizer <<<")
-    results["fast"] = test_full_action_pipeline("fast")
+    # Test BSpline tokenizer
+    print("\n>>> Testing BSpline tokenizer <<<")
+    results["bspline"] = test_full_action_pipeline("bspline", n_bins=255)
 
     # Test BIN tokenizer (legacy: 256 bins, asymmetric)
     print("\n>>> Testing BIN tokenizer (legacy: 256 bins) <<<")
     results["bin_legacy"] = test_full_action_pipeline("bin", n_bins=256, symmetric_delta_norm=False)
 
-    # Test BIN tokenizer (new: 257 bins, symmetric)
-    print("\n>>> Testing BIN tokenizer (symmetric: 257 bins) <<<")
-    results["bin_symmetric"] = test_full_action_pipeline("bin", n_bins=257, symmetric_delta_norm=True)
+    # Test BIN tokenizer (new: 255 bins, symmetric)
+    print("\n>>> Testing BIN tokenizer (symmetric: 255 bins) <<<")
+    results["bin_symmetric"] = test_full_action_pipeline("bin", n_bins=255, symmetric_delta_norm=True)
 
     # Test multiple samples with all
-    print("\n>>> Testing multiple samples with FAST <<<")
-    fast_stats = test_multiple_samples("fast")
+    print("\n>>> Testing multiple samples with BSpline <<<")
+    bspline_stats = test_multiple_samples("bspline", n_bins=255)
 
     print("\n>>> Testing multiple samples with BIN (legacy) <<<")
     bin_legacy_stats = test_multiple_samples("bin", n_bins=256, symmetric_delta_norm=False)
 
     print("\n>>> Testing multiple samples with BIN (symmetric) <<<")
-    bin_symmetric_stats = test_multiple_samples("bin", n_bins=257, symmetric_delta_norm=True)
+    bin_symmetric_stats = test_multiple_samples("bin", n_bins=255, symmetric_delta_norm=True)
 
     # Print comparison summary
     print("\n" + "=" * 80)
     print("TOKENIZER COMPARISON SUMMARY")
     print("=" * 80)
     print(f"\nSingle sample results:")
-    print(f"  FAST:          Joint MAE={results['fast']['joint_mae']:.6f}, Gripper MAE={results['fast']['gripper_mae']:.6f}")
+    print(f"  BSpline:       Joint MAE={results['bspline']['joint_mae']:.6f}, Gripper MAE={results['bspline']['gripper_mae']:.6f}")
     print(f"  BIN (legacy):  Joint MAE={results['bin_legacy']['joint_mae']:.6f}, Gripper MAE={results['bin_legacy']['gripper_mae']:.6f}")
     print(f"  BIN (symm):    Joint MAE={results['bin_symmetric']['joint_mae']:.6f}, Gripper MAE={results['bin_symmetric']['gripper_mae']:.6f}")
 
     print(f"\nMultiple samples results (mean ± std):")
-    print(f"  FAST:          Joint MAE={fast_stats['joint_mae_mean']:.6f}±{fast_stats['joint_mae_std']:.6f}, "
-          f"Gripper MAE={fast_stats['gripper_mae_mean']:.6f}±{fast_stats['gripper_mae_std']:.6f}")
+    print(f"  BSpline:       Joint MAE={bspline_stats['joint_mae_mean']:.6f}±{bspline_stats['joint_mae_std']:.6f}, "
+          f"Gripper MAE={bspline_stats['gripper_mae_mean']:.6f}±{bspline_stats['gripper_mae_std']:.6f}")
     print(f"  BIN (legacy):  Joint MAE={bin_legacy_stats['joint_mae_mean']:.6f}±{bin_legacy_stats['joint_mae_std']:.6f}, "
           f"Gripper MAE={bin_legacy_stats['gripper_mae_mean']:.6f}±{bin_legacy_stats['gripper_mae_std']:.6f}")
     print(f"  BIN (symm):    Joint MAE={bin_symmetric_stats['joint_mae_mean']:.6f}±{bin_symmetric_stats['joint_mae_std']:.6f}, "
@@ -403,9 +403,9 @@ def test_zero_reconstruction():
     print(f"   Decoded first row: {decoded[0, :6]}")
 
     # Test symmetric (should be exact)
-    print("\n2. Symmetric mode (257 bins, symmetric):")
+    print("\n2. Symmetric mode (255 bins, symmetric):")
     norm_sym = MultiRobotNormalizer("data/robotwin_norm_stats_h16.json", symmetric_delta_norm=True)
-    tok_sym = BinTokenizer(n_bins=257)
+    tok_sym = BinTokenizer(n_bins=255)
 
     normalized = norm_sym.normalize_delta_actions(zeros, "aloha-agilex")
     tokens = tok_sym.encode(normalized[None, :])
@@ -436,7 +436,7 @@ if __name__ == "__main__":
         "--tokenizer", "-t",
         type=str,
         default="both",
-        choices=["fast", "bin", "bin-symmetric", "both"],
+        choices=["bspline", "bin", "bin-symmetric", "both"],
         help="Which tokenizer to test (default: both)"
     )
     parser.add_argument(
@@ -451,8 +451,8 @@ if __name__ == "__main__":
     elif args.tokenizer == "both":
         test_both_tokenizers()
     elif args.tokenizer == "bin-symmetric":
-        test_full_action_pipeline("bin", n_bins=257, symmetric_delta_norm=True)
-        test_multiple_samples("bin", n_bins=257, symmetric_delta_norm=True)
+        test_full_action_pipeline("bin", n_bins=255, symmetric_delta_norm=True)
+        test_multiple_samples("bin", n_bins=255, symmetric_delta_norm=True)
     else:
         test_full_action_pipeline(args.tokenizer)
         test_multiple_samples(args.tokenizer)

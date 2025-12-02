@@ -26,10 +26,16 @@ class TrainingConfig:
     fsdp_use_orig_params: bool = True  # Required for optimizer state dict compatibility
     fsdp_limit_all_gathers: bool = True  # Limit concurrent all-gathers for memory efficiency
     original_vocab_size: int = 151936
-    new_vocab_size: int = 153984  # 151936 + 2048 FAST tokens (or 151936 + n_bins for bin tokenizer)
-    tokenizer_type: str = "fast"  # "fast" (compressed FAST tokenizer) or "bin" (OpenVLA-style bins)
-    n_bins: int = 256  # Number of bins for BinTokenizer (use 257 for exact zero reconstruction)
+    new_vocab_size: int = 152191  # 151936 + 255 bins (default for bspline/bin tokenizer)
+    tokenizer_type: str = "bspline"  # "bspline" (B-spline trajectory tokenizer) or "bin" (OpenVLA-style bins)
+    n_bins: int = 255  # Number of bins for quantization (255 for exact zero with symmetric bounds)
     symmetric_delta_norm: bool = False  # Use symmetric normalization for deltas (0 maps to exactly 0)
+
+    # B-spline tokenizer configuration
+    bspline_n_control_points: int = 8  # Number of B-spline control points per DoF
+    bspline_degree: int = 4  # B-spline polynomial degree
+    bspline_bounds: tuple[float, float] = (-1.0, 1.0)  # Bounds for control point values
+    bspline_token_order: str = "basis_first"  # Token ordering: "basis_first" or "joint_first"
 
     # Gripper binarization (converts continuous gripper values to binary 0/1)
     binarize_grippers: bool = False  # If True, binarize gripper values during training
@@ -121,20 +127,18 @@ class TrainingConfig:
         # Create checkpoint directory
         Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
-        # Validate tokenizer type and adjust vocab size
-        if self.tokenizer_type not in ("fast", "bin"):
-            raise ValueError(f"tokenizer_type must be 'fast' or 'bin', got {self.tokenizer_type}")
-
-        # Auto-adjust vocab size if using default value (153984 = FAST default)
-        if self.new_vocab_size == 153984:
-            if self.tokenizer_type == "bin":
-                self.new_vocab_size = self.original_vocab_size + self.n_bins
-                print(f"Using BinTokenizer with {self.n_bins} bins: adjusted new_vocab_size to {self.new_vocab_size}")
-            # else: keep default 153984 for FAST
+        # Validate tokenizer type
+        if self.tokenizer_type not in ("bspline", "bin"):
+            raise ValueError(f"tokenizer_type must be 'bspline' or 'bin', got {self.tokenizer_type}")
 
         # Validate n_bins
-        if self.tokenizer_type == "bin" and self.n_bins <= 0:
+        if self.n_bins <= 0:
             raise ValueError(f"n_bins must be positive, got {self.n_bins}")
+
+        # Compute vocab size: original + action token bins, rounded up to multiple of 64
+        # (improves GPU tensor core utilization)
+        raw_vocab_size = self.original_vocab_size + self.n_bins
+        self.new_vocab_size = ((raw_vocab_size + 63) // 64) * 64
 
         # Validate action horizon
         if self.action_horizon <= 0:
