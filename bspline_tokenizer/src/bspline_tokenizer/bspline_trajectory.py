@@ -24,6 +24,7 @@ Example usage:
     traj = BSplineTrajectory(control_points, degree=4)
 """
 
+import warnings
 import numpy as np
 from functools import lru_cache
 from typing import Tuple, Optional
@@ -170,6 +171,11 @@ class BSplineTrajectory:
         self.n_control_points = control_points.shape[1]
         self.degree = degree
 
+        if self.n_control_points < degree + 1:
+            raise ValueError(
+                f"n_control_points ({self.n_control_points}) must be >= degree + 1 ({degree + 1})"
+            )
+
         if knots is None:
             self.knots = create_clamped_knot_vector(self.n_control_points, degree)
         else:
@@ -227,6 +233,20 @@ class BSplineTrajectory:
 
         if len(t) != trajectory.shape[0]:
             raise ValueError(f"Length mismatch: t has {len(t)} points but trajectory has {trajectory.shape[0]} points")
+
+        # Clamp n_control_points and degree to avoid underdetermined systems
+        n_data = len(t)
+        effective_n_cp = min(n_control_points, n_data)
+        effective_degree = min(degree, effective_n_cp - 1)
+
+        if effective_n_cp < n_control_points or effective_degree < degree:
+            warnings.warn(
+                f"Reduced B-spline parameters for {n_data} data point(s): "
+                f"degree {degree}→{effective_degree}, "
+                f"n_control_points {n_control_points}→{effective_n_cp}"
+            )
+            n_control_points = effective_n_cp
+            degree = effective_degree
 
         n_dof = trajectory.shape[1]
         knots = create_clamped_knot_vector(n_control_points, degree)
@@ -317,6 +337,81 @@ class BSplineTrajectory:
             Action values of shape (n_dof,)
         """
         return self.evaluate(t)
+
+    def derivative(self, n: int = 1) -> 'BSplineTrajectory':
+        """
+        Return a new BSplineTrajectory representing the n-th derivative.
+
+        The derivative of a B-spline of degree p is a B-spline of degree p-1
+        with control points:
+            Q_i = p / (knots[i+p+1] - knots[i+1]) * (P_{i+1} - P_i)
+
+        Note: The derivative is with respect to the normalized parameter t in [0, 1].
+        If your original time span is T, multiply by 1/T for velocity, 1/T^2 for
+        acceleration, etc.
+
+        Args:
+            n: Order of derivative (1=velocity, 2=acceleration, etc.)
+
+        Returns:
+            New BSplineTrajectory representing the n-th derivative
+
+        Raises:
+            ValueError: If n > degree (derivative would be zero)
+
+        Example:
+            traj = BSplineTrajectory.fit(t, trajectory, n_control_points=8)
+            velocity = traj.derivative(1)
+            acceleration = traj.derivative(2)
+
+            # Evaluate velocity at t=0.5
+            vel = velocity.evaluate(0.5)
+        """
+        if n < 0:
+            raise ValueError(f"Derivative order must be non-negative, got {n}")
+
+        if n == 0:
+            return BSplineTrajectory(
+                self.control_points.copy(),
+                degree=self.degree,
+                knots=self.knots.copy()
+            )
+
+        if n > self.degree:
+            raise ValueError(
+                f"Cannot compute derivative of order {n} for B-spline of degree {self.degree}. "
+                f"Derivative order must be <= degree."
+            )
+
+        # Compute first derivative, then recurse for higher orders
+        p = self.degree
+        n_new_cp = self.n_control_points - 1
+
+        # New control points: Q_i = p / (knots[i+p+1] - knots[i+1]) * (P_{i+1} - P_i)
+        new_control_points = np.zeros((self.n_dof, n_new_cp))
+
+        for i in range(n_new_cp):
+            denom = self.knots[i + p + 1] - self.knots[i + 1]
+            if denom != 0:
+                new_control_points[:, i] = p / denom * (
+                    self.control_points[:, i + 1] - self.control_points[:, i]
+                )
+            # If denom == 0, the control point stays zero
+
+        # New knot vector: remove first and last knot
+        new_knots = self.knots[1:-1].copy()
+
+        deriv_traj = BSplineTrajectory(
+            new_control_points,
+            degree=p - 1,
+            knots=new_knots
+        )
+
+        # Recurse for higher order derivatives
+        if n > 1:
+            return deriv_traj.derivative(n - 1)
+
+        return deriv_traj
 
     def __repr__(self) -> str:
         return (
