@@ -21,7 +21,7 @@ Example usage:
     value = traj(0.5)
 
     # Create from control points directly
-    traj = BSplineTrajectory(control_points, degree=4)
+    traj = BSplineTrajectory(control_points, degree=3)
 """
 
 import warnings
@@ -146,13 +146,13 @@ class BSplineTrajectory:
         values = traj.evaluate(np.linspace(0, 1, 100))
 
         # Or create from control points
-        traj = BSplineTrajectory(control_points, degree=4)
+        traj = BSplineTrajectory(control_points, degree=3)
     """
 
     def __init__(
         self,
         control_points: np.ndarray,
-        degree: int = 4,
+        degree: int = 3,
         knots: Optional[np.ndarray] = None
     ):
         """
@@ -187,7 +187,7 @@ class BSplineTrajectory:
         t: np.ndarray,
         trajectory: np.ndarray,
         n_control_points: int = 8,
-        degree: int = 4,
+        degree: int = 3,
         bounds: Optional[Tuple[float, float]] = None,
         pin_endpoints: bool = False
     ) -> 'BSplineTrajectory':

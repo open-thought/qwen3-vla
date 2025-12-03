@@ -33,7 +33,7 @@ class TrainingConfig:
 
     # B-spline tokenizer configuration
     bspline_n_control_points: int = 8  # Number of B-spline control points per DoF
-    bspline_degree: int = 4  # B-spline polynomial degree
+    bspline_degree: int = 3  # B-spline polynomial degree
     bspline_bounds: tuple[float, float] = (-1.0, 1.0)  # Bounds for control point values
     bspline_token_order: str = "basis_first"  # Token ordering: "basis_first" or "joint_first"
 

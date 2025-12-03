@@ -300,7 +300,7 @@ if __name__ == "__main__":
     tokenizer = BSplineTokenizer(
         n_dof=2,
         n_control_points=8,
-        degree=4,
+        degree=3,
         bounds=(-1.5, 1.5),
         n_bins=256
     )

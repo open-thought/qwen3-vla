@@ -64,7 +64,7 @@ class Qwen3VLAPolicy:
         gripper_threshold: float = 0.5,  # Threshold for gripper binarization
         # B-spline tokenizer parameters
         bspline_n_control_points: int = 8,
-        bspline_degree: int = 4,
+        bspline_degree: int = 3,
         bspline_bounds: tuple[float, float] = (-1.0, 1.0),
         bspline_token_order: str = "basis_first",
     ):

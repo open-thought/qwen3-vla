@@ -20,7 +20,7 @@ from bspline_tokenizer import BSplineTokenizer
 tokenizer = BSplineTokenizer(
     n_dof=7,
     n_control_points=8,
-    degree=4,
+    degree=3,
     bounds=(-1.5, 1.5),
     n_bins=256,
 )
@@ -55,7 +55,7 @@ tokens, tokenizer = tokenize_trajectory(t, trajectory, n_control_points=8)
 from bspline_tokenizer import BSplineTrajectory
 
 # Fit trajectory to data
-traj = BSplineTrajectory.fit(t, trajectory, n_control_points=8, degree=4)
+traj = BSplineTrajectory.fit(t, trajectory, n_control_points=8, degree=3)
 
 # Evaluate at any time in [0, 1]
 values = traj.evaluate(np.array([0.0, 0.25, 0.5, 0.75, 1.0]))
@@ -87,7 +87,7 @@ action = ensemble.get_action(timestep=10)
 |-----------|-------------|---------|
 | `n_dof` | Degrees of freedom | 7 |
 | `n_control_points` | Control points per DoF | 8 |
-| `degree` | B-spline degree | 4 |
+| `degree` | B-spline degree | 3 |
 | `bounds` | Control point bounds | (-1.5, 1.5) |
 | `n_bins` | Quantization bins (odd for zero-centered) | 255 |
 | `token_order` | `'basis_first'` or `'joint_first'` | `'basis_first'` |

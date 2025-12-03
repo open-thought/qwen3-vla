@@ -92,7 +92,7 @@ class RoboTwinVLADataset(Dataset):
         state_dropout_full_prob: float = 0.0,
         # B-spline tokenizer parameters
         bspline_n_control_points: int = 8,
-        bspline_degree: int = 4,
+        bspline_degree: int = 3,
         bspline_bounds: tuple[float, float] = (-1.0, 1.0),
         bspline_token_order: str = "basis_first",
     ):

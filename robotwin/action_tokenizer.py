@@ -240,7 +240,7 @@ class BSplineActionTokenizer(BaseActionTokenizer):
     def __init__(
         self,
         n_control_points: int = 8,
-        degree: int = 4,
+        degree: int = 3,
         bounds: tuple[float, float] = (-1.0, 1.0),
         n_bins: int = 255,
         token_order: Literal['basis_first', 'joint_first'] = 'basis_first',
@@ -420,7 +420,7 @@ def create_action_tokenizer(
     tokenizer_type: Literal["bspline", "bin"] = "bspline",
     n_bins: int = 255,
     n_control_points: int = 8,
-    degree: int = 4,
+    degree: int = 3,
     bounds: tuple[float, float] = (-1.0, 1.0),
     token_order: Literal['basis_first', 'joint_first'] = 'basis_first',
     **kwargs

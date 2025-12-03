@@ -15,7 +15,7 @@ Example usage:
     tokenizer = BSplineTokenizer(
         n_dof=7,
         n_control_points=8,
-        degree=4,
+        degree=3,
         bounds=(-1.5, 1.5),
         n_bins=256,
         token_order='basis_first'
@@ -64,7 +64,7 @@ class BSplineTokenizer:
         self,
         n_dof: int = 7,
         n_control_points: int = 8,
-        degree: int = 4,
+        degree: int = 3,
         bounds: Tuple[float, float] = (-1.5, 1.5),
         n_bins: int = 255,
         token_order: Literal['basis_first', 'joint_first'] = 'basis_first'
@@ -299,7 +299,7 @@ def tokenize_trajectory(
     t: np.ndarray,
     trajectory: np.ndarray,
     n_control_points: int = 8,
-    degree: int = 4,
+    degree: int = 3,
     bounds: Tuple[float, float] = (-1.5, 1.5),
     n_bins: int = 255,
     token_order: Literal['basis_first', 'joint_first'] = 'basis_first'
@@ -368,7 +368,7 @@ if __name__ == "__main__":
         tokenizer = BSplineTokenizer(
             n_dof=n_dof,
             n_control_points=8,
-            degree=4,
+            degree=3,
             bounds=(-1.5, 1.5),
             n_bins=256,
             token_order=order  # type: ignore
