@@ -46,6 +46,9 @@ class VLATrainingSample:
     episode_id: str
     timestep: int
 
+    # State history for neural encoder (optional, must come last due to default value)
+    state_history: Optional[np.ndarray] = None  # (K, 2*dof + 2) normalized to [-1, 1]
+
 
 class RoboTwinVLADataset(Dataset):
     """
@@ -95,6 +98,8 @@ class RoboTwinVLADataset(Dataset):
         bspline_degree: int = 3,
         bspline_bounds: tuple[float, float] = (-1.0, 1.0),
         bspline_token_order: str = "basis_first",
+        # State history parameters
+        state_history_len: int = 0,  # 0 = disabled, >0 = number of past timesteps to include
     ):
         """
         Args:
@@ -129,6 +134,10 @@ class RoboTwinVLADataset(Dataset):
             state_dropout_prob: Probability of dropping out each individual state value (replaced
                 with "?" in prompt). Forces model to rely on images. Default 0.0 (disabled).
             state_dropout_full_prob: Probability of dropping ALL state values at once. Default 0.0.
+            state_history_len: Number of past timesteps to include in state history for neural
+                encoding. If 0, state history is disabled. If > 0, extracts the last K states
+                (including current) and returns them normalized to [-1, 1]. At episode start,
+                missing timesteps are padded with zeros. Default 0 (disabled).
         """
         self.dataset_root = Path(dataset_root)
         self.action_horizon = action_horizon
@@ -261,6 +270,9 @@ class RoboTwinVLADataset(Dataset):
         self.state_dropout_prob = state_dropout_prob
         self.state_dropout_full_prob = state_dropout_full_prob
 
+        # State history settings (for neural state encoder)
+        self.state_history_len = state_history_len
+
         # Zip file cache
         self.zip_cache = ZipFileCache(max_open=cache_size)
 
@@ -273,6 +285,10 @@ class RoboTwinVLADataset(Dataset):
             print(f"\nState dropout enabled:")
             print(f"  Per-value dropout prob: {state_dropout_prob}")
             print(f"  Full dropout prob: {state_dropout_full_prob}")
+
+        if state_history_len > 0:
+            print(f"\nState history enabled:")
+            print(f"  History length: {state_history_len} timesteps")
 
         print(f"\nDataset ready!")
         print(f"  Episodes: {len(self.index.episodes)}")
@@ -486,6 +502,13 @@ class RoboTwinVLADataset(Dataset):
         # Generate state dropout mask if enabled
         state_dropout_mask = self._generate_state_dropout_mask(len(discretized_state))
 
+        # Extract state history if enabled
+        state_history = None
+        if self.state_history_len > 0:
+            state_history = self._extract_state_history(
+                full_joints, full_grippers, timestep, robot_type
+            )
+
         # Tokenize delta actions
         action_tokens = self.tokenizer.encode(normalized_deltas, return_torch=False)[0]
 
@@ -508,6 +531,9 @@ class RoboTwinVLADataset(Dataset):
             # State (discretized for prompt)
             "discretized_state": discretized_state,  # (2*dof + 2,) in [0, 255]
             "state_dropout_mask": state_dropout_mask,  # Boolean mask, True = dropout (show "?")
+
+            # State history for neural encoder (normalized to [-1, 1])
+            "state_history": state_history,  # (K, 2*dof + 2) or None if disabled
 
             # Action targets
             "action_tokens": action_tokens,  # List of token IDs
@@ -554,6 +580,73 @@ class RoboTwinVLADataset(Dataset):
                 return mask
 
         return None
+
+    def _extract_state_history(
+        self,
+        full_joints: np.ndarray,
+        full_grippers: np.ndarray,
+        timestep: int,
+        robot_type: str,
+    ) -> np.ndarray:
+        """
+        Extract state history for neural encoder.
+
+        Extracts the last K timesteps of state (including current), normalized to [-1, 1].
+        At the start of episodes where we don't have K timesteps, pads with zeros.
+
+        Args:
+            full_joints: (T, 2*dof) joint positions for entire episode
+            full_grippers: (T, 2) gripper positions for entire episode
+            timestep: Current timestep index
+            robot_type: Robot type for normalization
+
+        Returns:
+            state_history: (K, 2*dof + 2) normalized state history, padded with zeros
+                          at the start if needed
+        """
+        K = self.state_history_len
+        state_dim = full_joints.shape[1] + full_grippers.shape[1]
+
+        # Calculate the range of timesteps to extract
+        # We want timesteps [timestep - K + 1, ..., timestep] inclusive (K total)
+        start_idx = timestep - K + 1
+
+        # Initialize output with zeros (for padding at episode start)
+        state_history = np.zeros((K, state_dim), dtype=np.float32)
+
+        # Calculate how many valid timesteps we have
+        if start_idx < 0:
+            # Need to pad at the beginning
+            pad_len = -start_idx
+            valid_start = 0
+            history_offset = pad_len
+        else:
+            pad_len = 0
+            valid_start = start_idx
+            history_offset = 0
+
+        # Extract valid timesteps
+        valid_len = K - pad_len
+        valid_end = valid_start + valid_len
+
+        # Get raw states for valid range
+        valid_joints = full_joints[valid_start:valid_end].astype(np.float32)
+        valid_grippers = full_grippers[valid_start:valid_end].astype(np.float32)
+
+        # Normalize each timestep
+        # Note: We normalize joints and grippers separately, then concatenate
+        normalized_joints = np.zeros_like(valid_joints)
+        normalized_grippers = np.zeros_like(valid_grippers)
+
+        for i in range(valid_len):
+            normalized_joints[i] = self.normalizer.normalize_state(valid_joints[i], robot_type)
+            normalized_grippers[i] = self.normalizer.normalize_grippers(valid_grippers[i], robot_type)
+
+        # Concatenate and place in output array
+        valid_states = np.concatenate([normalized_joints, normalized_grippers], axis=1)
+        state_history[history_offset:] = valid_states
+
+        return state_history
 
     def _load_and_resize_image(self, compressed_bytes: bytes) -> torch.Tensor:
         """Load compressed image, resize if needed, and apply augmentation."""

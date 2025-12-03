@@ -62,6 +62,30 @@ except ImportError:
 from train_config import TrainingConfig
 from robotwin_dataset import RoboTwinVLADataset
 from data_collator import VLADataCollator
+from model_with_state_history import (
+    Qwen3VLAModelWithStateHistory,
+    Qwen3VLAWithStateHistoryConfig,
+)
+from state_encoder import StateEncoderConfig
+
+
+def create_state_encoder_config(config: TrainingConfig) -> StateEncoderConfig:
+    """Create StateEncoderConfig from TrainingConfig."""
+    return StateEncoderConfig(
+        encoder_type=config.state_encoder_type,
+        history_len=config.state_history_len,
+        state_dim=14,  # Fixed: 2*6 DoF + 2 grippers for dual-arm robot
+        hidden_dim=config.state_encoder_hidden_dim,
+        n_output_tokens=config.state_encoder_n_output_tokens,
+        dropout=config.state_encoder_dropout,
+        conv_channels=config.state_encoder_conv_channels,
+        conv_kernel_size=config.state_encoder_conv_kernel_size,
+        n_heads=config.state_encoder_n_heads,
+        n_layers=config.state_encoder_n_layers,
+        rnn_type=config.state_encoder_rnn_type,
+        bidirectional=config.state_encoder_bidirectional,
+        rnn_layers=config.state_encoder_rnn_layers,
+    )
 
 
 def is_main_process():
@@ -199,14 +223,16 @@ def wrap_model_with_fsdp(model: nn.Module, config: TrainingConfig, local_rank: i
         # Apply activation checkpointing before moving to GPU (for memory efficiency)
         if config.fsdp_activation_checkpointing:
             # For DDP/regular models, use HuggingFace's built-in gradient checkpointing
-            if hasattr(model, 'gradient_checkpointing_enable'):
-                model.gradient_checkpointing_enable()
+            # Handle both raw HuggingFace models and Qwen3VLAModelWithStateHistory wrapper
+            inner_model = getattr(model, 'model', model)  # Get inner model if wrapped
+            if hasattr(inner_model, 'gradient_checkpointing_enable'):
+                inner_model.gradient_checkpointing_enable()
                 print_rank0("Enabled model's built-in gradient checkpointing")
                 # Verify it's actually enabled
-                if hasattr(model, 'is_gradient_checkpointing'):
-                    print_rank0(f"  is_gradient_checkpointing: {model.is_gradient_checkpointing}")
-                if hasattr(model.config, 'use_cache'):
-                    print_rank0(f"  config.use_cache: {model.config.use_cache}")
+                if hasattr(inner_model, 'is_gradient_checkpointing'):
+                    print_rank0(f"  is_gradient_checkpointing: {inner_model.is_gradient_checkpointing}")
+                if hasattr(inner_model.config, 'use_cache'):
+                    print_rank0(f"  config.use_cache: {inner_model.config.use_cache}")
             else:
                 print_rank0("Warning: Model does not support gradient_checkpointing_enable()")
 
@@ -260,6 +286,9 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
     """Create training and validation dataloaders with distributed samplers."""
     print_rank0("\nCreating datasets...")
 
+    # Determine state history length (0 if state encoder not enabled)
+    state_history_len = config.state_history_len if getattr(config, 'use_state_encoder', False) else 0
+
     # Create full dataset
     full_dataset = RoboTwinVLADataset(
         dataset_root=config.dataset_root,
@@ -288,6 +317,7 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         bspline_degree=config.bspline_degree,
         bspline_bounds=config.bspline_bounds,
         bspline_token_order=config.bspline_token_order,
+        state_history_len=state_history_len,
     )
 
     # Split into train/val
@@ -332,6 +362,7 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         bspline_degree=config.bspline_degree,
         bspline_bounds=config.bspline_bounds,
         bspline_token_order=config.bspline_token_order,
+        state_history_len=state_history_len,
     )
 
     # Use same indices for validation
@@ -401,6 +432,12 @@ def compute_gradient_norms(model, device, use_fsdp: bool = False) -> dict:
     sum the squared norms across all ranks before taking the square root.
     For DDP, each rank has full gradients, so no communication is needed.
 
+    Groups tracked:
+    - vision: Vision encoder (parameters with "visual" in name)
+    - state_encoder: State history encoder (parameters with "state_encoder" in name)
+    - embed: Embedding layers (parameters with "embed" or "lm_head" in name)
+    - lm: Language model (everything else)
+
     Args:
         model: The model (can be FSDP, DDP, or unwrapped)
         device: Device for tensor operations
@@ -409,9 +446,11 @@ def compute_gradient_norms(model, device, use_fsdp: bool = False) -> dict:
     vision_grad_sq = 0.0
     lm_grad_sq = 0.0
     embed_grad_sq = 0.0
+    state_encoder_grad_sq = 0.0
     vision_param_count = 0
     lm_param_count = 0
     embed_param_count = 0
+    state_encoder_param_count = 0
 
     for name, param in model.named_parameters():
         if param.grad is None:
@@ -419,7 +458,10 @@ def compute_gradient_norms(model, device, use_fsdp: bool = False) -> dict:
 
         grad_norm_sq = param.grad.detach().norm().item() ** 2
 
-        if "visual" in name:
+        if "state_encoder" in name:
+            state_encoder_grad_sq += grad_norm_sq
+            state_encoder_param_count += 1
+        elif "visual" in name:
             vision_grad_sq += grad_norm_sq
             vision_param_count += 1
         elif "embed" in name or "lm_head" in name:
@@ -433,22 +475,24 @@ def compute_gradient_norms(model, device, use_fsdp: bool = False) -> dict:
     # For DDP: each rank has full gradients after backward(), no communication needed
     if use_fsdp and dist.is_initialized():
         grad_sq_tensor = torch.tensor(
-            [vision_grad_sq, lm_grad_sq, embed_grad_sq],
+            [vision_grad_sq, lm_grad_sq, embed_grad_sq, state_encoder_grad_sq],
             device=device
         )
         dist.all_reduce(grad_sq_tensor, op=dist.ReduceOp.SUM)
-        vision_grad_sq, lm_grad_sq, embed_grad_sq = grad_sq_tensor.tolist()
+        vision_grad_sq, lm_grad_sq, embed_grad_sq, state_encoder_grad_sq = grad_sq_tensor.tolist()
 
-    total_grad_sq = vision_grad_sq + lm_grad_sq + embed_grad_sq
+    total_grad_sq = vision_grad_sq + lm_grad_sq + embed_grad_sq + state_encoder_grad_sq
 
     return {
         "grad_norm/vision": vision_grad_sq ** 0.5,
         "grad_norm/lm": lm_grad_sq ** 0.5,
         "grad_norm/embed": embed_grad_sq ** 0.5,
+        "grad_norm/state_encoder": state_encoder_grad_sq ** 0.5,
         "grad_norm/total": total_grad_sq ** 0.5,
         "grad_params/vision": vision_param_count,
         "grad_params/lm": lm_param_count,
         "grad_params/embed": embed_param_count,
+        "grad_params/state_encoder": state_encoder_param_count,
     }
 
 
@@ -589,6 +633,9 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
             if processor is not None:
                 processor.save_pretrained(model_path)
 
+            # Save training config as YAML for easy loading during eval
+            config.to_yaml(str(model_path / "training_config.yaml"))
+
             # Save training state (optimizer, scheduler, step)
             torch.save({
                 "step": step,
@@ -608,6 +655,9 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
 
                 if processor is not None:
                     processor.save_pretrained(best_path)
+
+                # Save training config for best model
+                config.to_yaml(str(best_path / "training_config.yaml"))
 
                 torch.save({
                     "step": step,
@@ -635,6 +685,9 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
             if processor is not None:
                 processor.save_pretrained(model_path)
 
+            # Save training config as YAML for easy loading during eval
+            config.to_yaml(str(model_path / "training_config.yaml"))
+
             # Save training state
             torch.save({
                 "step": step,
@@ -654,6 +707,9 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
 
                 if processor is not None:
                     processor.save_pretrained(best_path)
+
+                # Save training config for best model
+                config.to_yaml(str(best_path / "training_config.yaml"))
 
                 torch.save({
                     "step": step,
@@ -680,6 +736,9 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
 
     # Save scheduler and training metadata (only rank 0)
     if is_main_process():
+        # Save training config as YAML for easy loading during eval
+        config.to_yaml(str(model_path / "training_config.yaml"))
+
         torch.save({
             "step": step,
             "config": config.to_dict(),
@@ -698,6 +757,9 @@ def save_checkpoint_dcp(model, optimizer, scheduler, step, config, processor=Non
         dcp.save(state_dict, storage_writer=best_storage_writer)
 
         if is_main_process():
+            # Save training config for best model
+            config.to_yaml(str(best_path / "training_config.yaml"))
+
             torch.save({
                 "step": step,
                 "config": config.to_dict(),
@@ -1045,8 +1107,27 @@ def train(config: TrainingConfig):
     # Load model and processor first (processor needed for dataloaders)
     print_rank0("\nInitializing model...")
 
+    use_state_encoder = getattr(config, 'use_state_encoder', False)
+
     # Always load fresh model - checkpoint loading happens after FSDP wrapping
-    model, processor = load_model_for_fsdp(config)
+    if use_state_encoder:
+        # Create Qwen3VLAModelWithStateHistory with state encoder
+        state_encoder_config = create_state_encoder_config(config)
+        model_config = Qwen3VLAWithStateHistoryConfig(
+            model_name=config.model_name,
+            new_vocab_size=config.new_vocab_size,
+            original_vocab_size=config.original_vocab_size,
+            state_encoder_config=state_encoder_config,
+        )
+        # Use device_map=None so FSDP/DDP can handle device placement
+        model_wrapper = Qwen3VLAModelWithStateHistory(model_config, device_map=None)
+        model = model_wrapper  # The wrapper will be wrapped by FSDP/DDP
+        processor = model_wrapper.processor
+        print_rank0(f"State encoder enabled: {config.state_encoder_type}")
+        print_rank0(f"  History length: {config.state_history_len}")
+        print_rank0(f"  Output tokens: {config.state_encoder_n_output_tokens}")
+    else:
+        model, processor = load_model_for_fsdp(config)
 
     # Create dataloaders (needs processor for collator)
     train_loader, val_loader, train_sampler = create_distributed_dataloaders(
@@ -1235,17 +1316,19 @@ def train(config: TrainingConfig):
                         print(f"\n  Grad norms - total: {grad_norms['grad_norm/total']:.4f}, "
                               f"vision: {grad_norms['grad_norm/vision']:.4f}, "
                               f"lm: {grad_norms['grad_norm/lm']:.4f}, "
-                              f"embed: {grad_norms['grad_norm/embed']:.4f}")
+                              f"embed: {grad_norms['grad_norm/embed']:.4f}, "
+                              f"state_enc: {grad_norms['grad_norm/state_encoder']:.4f}")
 
                     if config.enable_wandb and WANDB_AVAILABLE and is_main_process():
                         log_dict = {
                             "train/loss": avg_loss,
                             "train/step": global_step,
                             "train/epoch": epoch,
-                            # Gradient norms for debugging vision encoder training
+                            # Gradient norms for debugging different model components
                             "grad_norm/vision": grad_norms["grad_norm/vision"],
                             "grad_norm/lm": grad_norms["grad_norm/lm"],
                             "grad_norm/embed": grad_norms["grad_norm/embed"],
+                            "grad_norm/state_encoder": grad_norms["grad_norm/state_encoder"],
                             "grad_norm/total": grad_norms["grad_norm/total"],
                         }
                         if len(lrs) > 1:

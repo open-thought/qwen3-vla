@@ -42,6 +42,26 @@ from generate_episode_instructions import generate_episode_descriptions
 # Local imports
 from eval.qwen3_vla_policy import Qwen3VLAPolicy, get_model, reset_model
 from eval.video_recorder import MultiCameraRecorder, get_observer_rgb
+from train_config import TrainingConfig
+
+
+def load_training_config(checkpoint_path: str) -> TrainingConfig:
+    """
+    Load training configuration from checkpoint directory.
+
+    Args:
+        checkpoint_path: Path to checkpoint directory
+
+    Returns:
+        TrainingConfig if found, None otherwise
+    """
+    config_path = Path(checkpoint_path) / "training_config.yaml"
+    if config_path.exists():
+        print(f"Loading training config from {config_path}")
+        return TrainingConfig.from_yaml(str(config_path))
+    else:
+        print(f"No training_config.yaml found in {checkpoint_path}")
+        return None
 
 
 def get_camera_config(camera_type: str) -> dict:
@@ -585,8 +605,55 @@ def main():
         choices=["basis_first", "joint_first"],
         help="B-spline token ordering mode (default: basis_first)"
     )
+    parser.add_argument(
+        "--auto_config",
+        action="store_true",
+        help="Automatically load configuration from training_config.yaml in checkpoint directory. "
+             "Command line arguments will override loaded config values."
+    )
 
     args = parser.parse_args()
+
+    # Load training config if requested
+    training_config = None
+    if args.auto_config:
+        training_config = load_training_config(args.checkpoint)
+        if training_config:
+            print("Applying settings from training config (CLI args override):")
+            # Apply training config as defaults (CLI args override)
+            if not any(arg.startswith('--norm_stats') for arg in sys.argv):
+                args.norm_stats = training_config.norm_stats_path
+                print(f"  norm_stats: {args.norm_stats}")
+            if not any(arg.startswith('--action_horizon') for arg in sys.argv):
+                args.action_horizon = training_config.action_horizon
+                print(f"  action_horizon: {args.action_horizon}")
+            if not any(arg.startswith('--tokenizer_type') for arg in sys.argv):
+                args.tokenizer_type = training_config.tokenizer_type
+                print(f"  tokenizer_type: {args.tokenizer_type}")
+            if not any(arg.startswith('--n_bins') for arg in sys.argv):
+                args.n_bins = training_config.n_bins
+                print(f"  n_bins: {args.n_bins}")
+            if not any(arg.startswith('--symmetric_delta_norm') for arg in sys.argv):
+                args.symmetric_delta_norm = training_config.symmetric_delta_norm
+                print(f"  symmetric_delta_norm: {args.symmetric_delta_norm}")
+            if not any(arg.startswith('--bspline_n_control_points') for arg in sys.argv):
+                args.bspline_n_control_points = training_config.bspline_n_control_points
+                print(f"  bspline_n_control_points: {args.bspline_n_control_points}")
+            if not any(arg.startswith('--bspline_degree') for arg in sys.argv):
+                args.bspline_degree = training_config.bspline_degree
+                print(f"  bspline_degree: {args.bspline_degree}")
+            if not any(arg.startswith('--bspline_bounds') for arg in sys.argv):
+                args.bspline_bounds = list(training_config.bspline_bounds)
+                print(f"  bspline_bounds: {args.bspline_bounds}")
+            if not any(arg.startswith('--bspline_token_order') for arg in sys.argv):
+                args.bspline_token_order = training_config.bspline_token_order
+                print(f"  bspline_token_order: {args.bspline_token_order}")
+            if not any(arg.startswith('--binarize_gripper') for arg in sys.argv):
+                args.binarize_gripper = training_config.binarize_grippers
+                print(f"  binarize_gripper: {args.binarize_gripper}")
+            if not any(arg.startswith('--gripper_threshold') for arg in sys.argv):
+                args.gripper_threshold = training_config.gripper_open_threshold
+                print(f"  gripper_threshold: {args.gripper_threshold}")
 
     # Handle video flag
     record_video = args.record_video and not args.no_video
@@ -621,6 +688,21 @@ def main():
         "bspline_bounds": tuple(args.bspline_bounds),
         "bspline_token_order": args.bspline_token_order,
     }
+
+    # Add state encoder settings from training config if available
+    if training_config and getattr(training_config, 'use_state_encoder', False):
+        model_args["use_state_encoder"] = True
+        model_args["state_encoder_type"] = training_config.state_encoder_type
+        model_args["state_history_len"] = training_config.state_history_len
+        model_args["state_encoder_hidden_dim"] = training_config.state_encoder_hidden_dim
+        model_args["state_encoder_n_output_tokens"] = training_config.state_encoder_n_output_tokens
+        model_args["state_encoder_dropout"] = training_config.state_encoder_dropout
+        model_args["state_encoder_conv_channels"] = training_config.state_encoder_conv_channels
+        model_args["state_encoder_conv_kernel_size"] = training_config.state_encoder_conv_kernel_size
+        print(f"  State encoder enabled: {training_config.state_encoder_type}")
+        print(f"    history_len: {training_config.state_history_len}")
+        print(f"    n_output_tokens: {training_config.state_encoder_n_output_tokens}")
+
     model = get_model(model_args)
 
     # Run evaluation on each task

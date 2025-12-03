@@ -27,8 +27,32 @@ except ImportError:
 
 from train_config import TrainingConfig
 from model import Qwen3VLAModel
+from model_with_state_history import (
+    Qwen3VLAModelWithStateHistory,
+    Qwen3VLAWithStateHistoryConfig,
+)
+from state_encoder import StateEncoderConfig
 from robotwin_dataset import RoboTwinVLADataset
 from data_collator import VLADataCollator
+
+
+def create_state_encoder_config(config: TrainingConfig) -> StateEncoderConfig:
+    """Create StateEncoderConfig from TrainingConfig."""
+    return StateEncoderConfig(
+        encoder_type=config.state_encoder_type,
+        history_len=config.state_history_len,
+        state_dim=14,  # Fixed: 2*6 DoF + 2 grippers for dual-arm robot
+        hidden_dim=config.state_encoder_hidden_dim,
+        n_output_tokens=config.state_encoder_n_output_tokens,
+        dropout=config.state_encoder_dropout,
+        conv_channels=config.state_encoder_conv_channels,
+        conv_kernel_size=config.state_encoder_conv_kernel_size,
+        n_heads=config.state_encoder_n_heads,
+        n_layers=config.state_encoder_n_layers,
+        rnn_type=config.state_encoder_rnn_type,
+        bidirectional=config.state_encoder_bidirectional,
+        rnn_layers=config.state_encoder_rnn_layers,
+    )
 
 
 def set_seed(seed: int):
@@ -41,11 +65,14 @@ def set_seed(seed: int):
 
 def compute_gradient_norms(model) -> dict:
     """
-    Compute gradient norms for vision encoder and language model parameters separately.
+    Compute gradient norms for different parameter groups separately.
 
-    This helps diagnose if the vision encoder is receiving gradients during training.
-    If vision gradients are near zero while LM gradients are normal, the model may not
-    be learning from visual inputs.
+    This helps diagnose if different parts of the model are receiving gradients.
+    Groups tracked:
+    - vision: Vision encoder (parameters with "visual" in name)
+    - state_encoder: State history encoder (parameters with "state_encoder" in name)
+    - embed: Embedding layers (parameters with "embed" or "lm_head" in name)
+    - lm: Language model (everything else)
 
     Returns:
         Dictionary with gradient norm statistics
@@ -53,9 +80,11 @@ def compute_gradient_norms(model) -> dict:
     vision_grad_sq = 0.0
     lm_grad_sq = 0.0
     embed_grad_sq = 0.0
+    state_encoder_grad_sq = 0.0
     vision_param_count = 0
     lm_param_count = 0
     embed_param_count = 0
+    state_encoder_param_count = 0
 
     for name, param in model.named_parameters():
         if param.grad is None:
@@ -63,7 +92,10 @@ def compute_gradient_norms(model) -> dict:
 
         grad_norm_sq = param.grad.norm().item() ** 2
 
-        if "visual" in name:
+        if "state_encoder" in name:
+            state_encoder_grad_sq += grad_norm_sq
+            state_encoder_param_count += 1
+        elif "visual" in name:
             vision_grad_sq += grad_norm_sq
             vision_param_count += 1
         elif "embed" in name or "lm_head" in name:
@@ -73,20 +105,27 @@ def compute_gradient_norms(model) -> dict:
             lm_grad_sq += grad_norm_sq
             lm_param_count += 1
 
+    total_grad_sq = vision_grad_sq + lm_grad_sq + embed_grad_sq + state_encoder_grad_sq
+
     return {
         "grad_norm/vision": vision_grad_sq ** 0.5,
         "grad_norm/lm": lm_grad_sq ** 0.5,
         "grad_norm/embed": embed_grad_sq ** 0.5,
-        "grad_norm/total": (vision_grad_sq + lm_grad_sq + embed_grad_sq) ** 0.5,
+        "grad_norm/state_encoder": state_encoder_grad_sq ** 0.5,
+        "grad_norm/total": total_grad_sq ** 0.5,
         "grad_params/vision": vision_param_count,
         "grad_params/lm": lm_param_count,
         "grad_params/embed": embed_param_count,
+        "grad_params/state_encoder": state_encoder_param_count,
     }
 
 
 def create_dataloaders(config: TrainingConfig):
     """Create training and validation dataloaders."""
     print("\nCreating datasets...")
+
+    # Determine state history length (0 if state encoder not enabled)
+    state_history_len = config.state_history_len if getattr(config, 'use_state_encoder', False) else 0
 
     # Create full dataset
     full_dataset = RoboTwinVLADataset(
@@ -116,6 +155,7 @@ def create_dataloaders(config: TrainingConfig):
         bspline_degree=config.bspline_degree,
         bspline_bounds=config.bspline_bounds,
         bspline_token_order=config.bspline_token_order,
+        state_history_len=state_history_len,
     )
 
     # Split into train/val
@@ -160,6 +200,7 @@ def create_dataloaders(config: TrainingConfig):
         bspline_degree=config.bspline_degree,
         bspline_bounds=config.bspline_bounds,
         bspline_token_order=config.bspline_token_order,
+        state_history_len=state_history_len,
     )
 
     # Use same indices for validation
@@ -258,6 +299,9 @@ def save_checkpoint(model, optimizer, scheduler, step, config, is_best=False):
     model_path = checkpoint_dir / f"step_{step}"
     model.save_pretrained(str(model_path))
 
+    # Save training config as YAML for easy loading during eval
+    config.to_yaml(str(model_path / "training_config.yaml"))
+
     # Save training state
     state_path = checkpoint_dir / f"step_{step}_state.pt"
     torch.save({
@@ -273,6 +317,8 @@ def save_checkpoint(model, optimizer, scheduler, step, config, is_best=False):
     if is_best:
         best_path = checkpoint_dir / "best_model"
         model.save_pretrained(str(best_path))
+        # Also save config for best model
+        config.to_yaml(str(best_path / "training_config.yaml"))
         print(f"Best model saved to {best_path}")
 
 
@@ -299,24 +345,40 @@ def train(config: TrainingConfig):
 
     # Create model
     print("\nInitializing model...")
+    use_state_encoder = getattr(config, 'use_state_encoder', False)
+
     if config.resume_from_checkpoint:
         # Load model from checkpoint
         print(f"Loading model from checkpoint: {config.resume_from_checkpoint}")
-        model = Qwen3VLAModel.from_pretrained(config.resume_from_checkpoint)
+        if use_state_encoder:
+            model = Qwen3VLAModelWithStateHistory.from_pretrained(config.resume_from_checkpoint)
+        else:
+            model = Qwen3VLAModel.from_pretrained(config.resume_from_checkpoint)
     else:
-        model = Qwen3VLAModel(
-            model_name=config.model_name,
-            new_vocab_size=config.new_vocab_size,
-            use_lora=config.use_lora,
-            lora_r=config.lora_r,
-            lora_alpha=config.lora_alpha,
-            lora_target_modules=config.lora_target_modules,
-            lora_dropout=config.lora_dropout,
-        )
+        if use_state_encoder:
+            # Create state encoder config
+            state_encoder_config = create_state_encoder_config(config)
+            model_config = Qwen3VLAWithStateHistoryConfig(
+                model_name=config.model_name,
+                new_vocab_size=config.new_vocab_size,
+                original_vocab_size=config.original_vocab_size,
+                state_encoder_config=state_encoder_config,
+            )
+            model = Qwen3VLAModelWithStateHistory(model_config, device_map="cuda:0")
+        else:
+            model = Qwen3VLAModel(
+                model_name=config.model_name,
+                new_vocab_size=config.new_vocab_size,
+                use_lora=config.use_lora,
+                lora_r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_target_modules=config.lora_target_modules,
+                lora_dropout=config.lora_dropout,
+            )
 
-    # Count parameters
-    total_params = sum(p.numel() for p in model.model.parameters())
-    trainable_params = sum(p.numel() for p in model.model.parameters() if p.requires_grad)
+    # Count parameters (includes state encoder if present)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\nModel parameters:")
     print(f"  Total: {total_params:,}")
     print(f"  Trainable: {trainable_params:,}")
@@ -333,7 +395,7 @@ def train(config: TrainingConfig):
         vision_params = []
         other_params = []
 
-        for name, param in model.model.named_parameters():
+        for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
             if "visual" in name:
@@ -364,7 +426,7 @@ def train(config: TrainingConfig):
     else:
         # Use single learning rate for all parameters
         optimizer = AdamW(
-            model.model.parameters(),
+            model.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
         )
@@ -404,7 +466,7 @@ def train(config: TrainingConfig):
     print("Starting training...")
     print("=" * 60)
 
-    model.model.train()
+    model.train()
     global_step = start_step
     running_loss = 0
     micro_step = 0  # Counts microbatches within a gradient accumulation cycle
@@ -425,17 +487,17 @@ def train(config: TrainingConfig):
             batch = next(train_iterator)
 
         # Training step (forward + backward, no optimizer step yet)
-        loss = train_step(model.model, batch, config.use_amp)
+        loss = train_step(model, batch, config.use_amp)
         running_loss += loss
         micro_step += 1
 
         # Gradient accumulation complete - do optimizer step
         if micro_step % config.gradient_accumulation_steps == 0:
             # Compute gradient norms before clipping (for logging)
-            grad_norms = compute_gradient_norms(model.model)
+            grad_norms = compute_gradient_norms(model)
 
             # Clip gradients
-            torch.nn.utils.clip_grad_norm_(model.model.parameters(), config.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
 
             # Optimizer step
             optimizer.step()
@@ -465,10 +527,11 @@ def train(config: TrainingConfig):
                     log_dict = {
                         "train/loss": avg_loss,
                         "train/step": global_step,
-                        # Gradient norms for debugging vision encoder
+                        # Gradient norms for debugging different model components
                         "grad_norm/vision": grad_norms["grad_norm/vision"],
                         "grad_norm/lm": grad_norms["grad_norm/lm"],
                         "grad_norm/embed": grad_norms["grad_norm/embed"],
+                        "grad_norm/state_encoder": grad_norms["grad_norm/state_encoder"],
                         "grad_norm/total": grad_norms["grad_norm/total"],
                     }
 
@@ -485,7 +548,7 @@ def train(config: TrainingConfig):
 
             # Validation
             if global_step % config.val_interval == 0:
-                val_loss = validate(model.model, val_loader, config, global_step)
+                val_loss = validate(model, val_loader, config, global_step)
                 print(f"\nStep {global_step}: Validation loss = {val_loss:.4f}")
 
                 if config.enable_wandb and WANDB_AVAILABLE:

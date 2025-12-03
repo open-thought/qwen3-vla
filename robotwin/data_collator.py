@@ -226,6 +226,22 @@ class VLADataCollator:
         batch_inputs["attention_mask"] = torch.stack(padded_attention_mask)
         batch_inputs["labels"] = torch.stack(padded_labels)
 
+        # Handle state history if present
+        # Check if any sample has state_history
+        if any(sample.get("state_history") is not None for sample in samples):
+            state_histories = []
+            for sample in samples:
+                state_hist = sample.get("state_history")
+                if state_hist is not None:
+                    state_histories.append(torch.tensor(state_hist, dtype=torch.float32))
+                else:
+                    # This shouldn't happen if state_history is consistently enabled/disabled
+                    raise ValueError(
+                        "Inconsistent state_history: some samples have it, others don't. "
+                        "Ensure state_history_len is set consistently in the dataset."
+                    )
+            batch_inputs["state_history"] = torch.stack(state_histories)  # (batch, K, state_dim)
+
         return batch_inputs
 
 

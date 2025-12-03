@@ -75,6 +75,26 @@ class TrainingConfig:
     state_reconstruction: bool = False  # Enable state reconstruction auxiliary task
     state_reconstruction_only_on_dropout: bool = True  # Only add reconstruction when state was dropped
 
+    # State history encoder configuration
+    # When enabled, encodes K timesteps of robot state history through a neural network
+    # and prepends the resulting embeddings to the transformer input sequence
+    use_state_encoder: bool = False  # Enable neural state history encoding
+    state_encoder_type: str = "conv1d"  # "conv1d", "mlp", "transformer", "rnn"
+    state_history_len: int = 10  # Number of past timesteps (K) to encode
+    state_encoder_hidden_dim: int = 256  # Hidden dimension for encoder
+    state_encoder_n_output_tokens: int = 4  # Number of output embedding tokens
+    state_encoder_dropout: float = 0.1  # Dropout for regularization
+    # Conv1D encoder specific
+    state_encoder_conv_channels: Optional[list[int]] = None  # Default: [64, 128, 256]
+    state_encoder_conv_kernel_size: int = 3
+    # Transformer encoder specific
+    state_encoder_n_heads: int = 4
+    state_encoder_n_layers: int = 2
+    # RNN encoder specific
+    state_encoder_rnn_type: str = "lstm"  # "lstm" or "gru"
+    state_encoder_bidirectional: bool = True
+    state_encoder_rnn_layers: int = 2
+
     # Training split
     validation_split: float = 0.05
 

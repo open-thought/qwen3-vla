@@ -15,8 +15,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import numpy as np
 import torch
 import time
-from PIL import Image
 from typing import Optional
+from collections import deque
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 # Enable flash SDP for better performance with PyTorch 2.9+
@@ -25,6 +25,8 @@ torch.backends.cuda.enable_flash_sdp(True)
 from action_tokenizer import create_action_tokenizer
 from normalization import MultiRobotNormalizer, discretize_normalized_values
 from prompt_formatter import PromptFormatter
+from model_with_state_history import Qwen3VLAModelWithStateHistory
+from state_encoder import StateEncoderConfig
 
 
 class Qwen3VLAPolicy:
@@ -67,6 +69,15 @@ class Qwen3VLAPolicy:
         bspline_degree: int = 3,
         bspline_bounds: tuple[float, float] = (-1.0, 1.0),
         bspline_token_order: str = "basis_first",
+        # State encoder parameters
+        use_state_encoder: bool = False,
+        state_encoder_type: str = "conv1d",
+        state_history_len: int = 10,
+        state_encoder_hidden_dim: int = 256,
+        state_encoder_n_output_tokens: int = 4,
+        state_encoder_dropout: float = 0.1,
+        state_encoder_conv_channels: list = None,
+        state_encoder_conv_kernel_size: int = 3,
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -93,6 +104,14 @@ class Qwen3VLAPolicy:
             bspline_degree: B-spline polynomial degree (default: 4)
             bspline_bounds: (lower, upper) bounds for control point values
             bspline_token_order: Token ordering mode ("basis_first" or "joint_first")
+            use_state_encoder: If True, use neural state encoder for state history
+            state_encoder_type: Type of state encoder ("conv1d", "mlp", "transformer", "rnn")
+            state_history_len: Number of past timesteps to encode (K)
+            state_encoder_hidden_dim: Hidden dimension for encoder
+            state_encoder_n_output_tokens: Number of output embedding tokens
+            state_encoder_dropout: Dropout rate for encoder
+            state_encoder_conv_channels: List of conv channels for Conv1D encoder
+            state_encoder_conv_kernel_size: Kernel size for Conv1D encoder
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -110,6 +129,10 @@ class Qwen3VLAPolicy:
         self.binarize_gripper = binarize_gripper
         self.gripper_threshold = gripper_threshold
 
+        # State encoder settings
+        self.use_state_encoder = use_state_encoder
+        self.state_history_len = state_history_len
+
         # Timing statistics
         self.total_generate_time = 0.0
         self.total_tokens_generated = 0
@@ -117,14 +140,40 @@ class Qwen3VLAPolicy:
 
         print(f"Loading Qwen3-VLA from {checkpoint_path}...")
 
-        # Load model with SDPA attention for better performance
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            checkpoint_path,
-            dtype=torch.bfloat16,
-            device_map=device,
-            trust_remote_code=True,
-            attn_implementation="sdpa",
-        )
+        if use_state_encoder:
+            # Load model with state encoder wrapper using from_pretrained
+            print(f"Using state encoder: {state_encoder_type}, history_len={state_history_len}")
+
+            # Create state encoder config
+            # Note: state_dim = 2*dof + 2 (both arms + grippers) = 14 for ALOHA
+            state_encoder_config = StateEncoderConfig(
+                encoder_type=state_encoder_type,
+                history_len=state_history_len,
+                state_dim=14,  # Will be set based on robot type (2*6 + 2 = 14 for ALOHA)
+                hidden_dim=state_encoder_hidden_dim,
+                output_dim=1536,  # Will be overridden by model hidden size
+                n_output_tokens=state_encoder_n_output_tokens,
+                dropout=state_encoder_dropout,
+                conv_channels=state_encoder_conv_channels,
+                conv_kernel_size=state_encoder_conv_kernel_size,
+            )
+
+            # Use from_pretrained which handles loading state encoder weights
+            self.model = Qwen3VLAModelWithStateHistory.from_pretrained(
+                checkpoint_path,
+                device_map=device,
+                state_encoder_config=state_encoder_config,
+            )
+        else:
+            # Load model without state encoder
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                checkpoint_path,
+                dtype=torch.bfloat16,
+                device_map=device,
+                trust_remote_code=True,
+                attn_implementation="sdpa",
+            )
+
         self.model.eval()
         print("model type", type(self.model))
 
@@ -168,10 +217,21 @@ class Qwen3VLAPolicy:
         self.current_qpos = None
         self.step_count = 0
 
+        # State history buffer for neural state encoder
+        # Stores normalized state vectors (2*dof + 2 = 14 for aloha) in [-1, 1]
+        if self.use_state_encoder:
+            self.state_history_buffer = deque(maxlen=self.state_history_len)
+            print(f"State history buffer initialized: maxlen={self.state_history_len}, state_dim={self.action_dim}")
+        else:
+            self.state_history_buffer = None
+
     def reset(self):
         """Reset policy state at the start of a new episode."""
         self.current_qpos = None
         self.step_count = 0
+        # Clear state history buffer
+        if self.state_history_buffer is not None:
+            self.state_history_buffer.clear()
 
     def print_timing_stats(self):
         """Print timing statistics summary."""
@@ -321,6 +381,10 @@ class Qwen3VLAPolicy:
         # Concatenate normalized state and grippers: (2*dof + 2,) to match training
         normalized_state_with_grippers = np.concatenate([normalized_state, normalized_grippers])
 
+        # Update state history buffer if using state encoder
+        if self.state_history_buffer is not None:
+            self.state_history_buffer.append(normalized_state_with_grippers.copy())
+
         # Discretize to [0, 255] for prompt
         discretized_state = discretize_normalized_values(normalized_state_with_grippers, num_bins=256)
 
@@ -349,6 +413,25 @@ class Qwen3VLAPolicy:
         # Move to device
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
+        # Build state history tensor if using state encoder
+        state_history_tensor = None
+        if self.use_state_encoder and self.state_history_buffer is not None:
+            # Pad state history if we don't have enough samples yet
+            history_list = list(self.state_history_buffer)
+            while len(history_list) < self.state_history_len:
+                # Pad with the oldest available state (or zeros if empty)
+                if len(history_list) > 0:
+                    history_list.insert(0, history_list[0].copy())
+                else:
+                    history_list.insert(0, np.zeros(self.action_dim))
+
+            # Stack into tensor: (K, state_dim)
+            state_history_np = np.stack(history_list[-self.state_history_len:], axis=0)
+            # Add batch dimension and convert to tensor: (1, K, state_dim)
+            state_history_tensor = torch.from_numpy(state_history_np).unsqueeze(0).to(
+                device=self.device, dtype=torch.bfloat16
+            )
+
         # Generate action tokens
         with torch.no_grad():
             torch.cuda.synchronize() if self.device.startswith("cuda") else None
@@ -356,7 +439,9 @@ class Qwen3VLAPolicy:
 
             # Use sampling if temperature > 0, otherwise greedy decoding
             do_sample = self.temperature > 0
-            outputs = self.model.generate(
+
+            # Build generate kwargs
+            generate_kwargs = dict(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=do_sample,
@@ -367,6 +452,12 @@ class Qwen3VLAPolicy:
                 eos_token_id=[self.EOT_TOKEN_ID],  # Stop at EOT token
                 use_cache=True,  # Enable KV caching (should be default, but explicit)
             )
+
+            # Add state history if using state encoder
+            if state_history_tensor is not None:
+                generate_kwargs["state_history"] = state_history_tensor
+
+            outputs = self.model.generate(**generate_kwargs)
 
             torch.cuda.synchronize() if self.device.startswith("cuda") else None
             generate_time = time.perf_counter() - start_time
@@ -592,6 +683,14 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
             - bspline_degree: B-spline polynomial degree (default: 4)
             - bspline_bounds: Bounds for control point values (default: (-1.0, 1.0))
             - bspline_token_order: Token ordering mode (default: "basis_first")
+            - use_state_encoder: If True, use neural state encoder (default: False)
+            - state_encoder_type: Type of state encoder (default: "conv1d")
+            - state_history_len: Number of past timesteps to encode (default: 10)
+            - state_encoder_hidden_dim: Hidden dimension (default: 256)
+            - state_encoder_n_output_tokens: Number of output tokens (default: 4)
+            - state_encoder_dropout: Dropout rate (default: 0.1)
+            - state_encoder_conv_channels: Conv channels list (default: [64, 128, 256])
+            - state_encoder_conv_kernel_size: Kernel size (default: 3)
 
     Returns:
         Qwen3VLAPolicy instance
@@ -623,6 +722,16 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     bspline_bounds = usr_args.get("bspline_bounds", (-1.0, 1.0))
     bspline_token_order = usr_args.get("bspline_token_order", "basis_first")
 
+    # State encoder parameters
+    use_state_encoder = usr_args.get("use_state_encoder", False)
+    state_encoder_type = usr_args.get("state_encoder_type", "conv1d")
+    state_history_len = usr_args.get("state_history_len", 10)
+    state_encoder_hidden_dim = usr_args.get("state_encoder_hidden_dim", 256)
+    state_encoder_n_output_tokens = usr_args.get("state_encoder_n_output_tokens", 4)
+    state_encoder_dropout = usr_args.get("state_encoder_dropout", 0.1)
+    state_encoder_conv_channels = usr_args.get("state_encoder_conv_channels", None)
+    state_encoder_conv_kernel_size = usr_args.get("state_encoder_conv_kernel_size", 3)
+
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
         norm_stats_path=norm_stats_path,
@@ -642,6 +751,15 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         bspline_degree=bspline_degree,
         bspline_bounds=bspline_bounds,
         bspline_token_order=bspline_token_order,
+        # State encoder
+        use_state_encoder=use_state_encoder,
+        state_encoder_type=state_encoder_type,
+        state_history_len=state_history_len,
+        state_encoder_hidden_dim=state_encoder_hidden_dim,
+        state_encoder_n_output_tokens=state_encoder_n_output_tokens,
+        state_encoder_dropout=state_encoder_dropout,
+        state_encoder_conv_channels=state_encoder_conv_channels,
+        state_encoder_conv_kernel_size=state_encoder_conv_kernel_size,
     )
 
     return _policy_instance

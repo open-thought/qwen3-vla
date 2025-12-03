@@ -3,6 +3,7 @@
 # Using BSplineTokenizer with 255 bins and symmetric delta normalization
 # BSpline provides smooth trajectory encoding with 50% fewer tokens than Bin
 # Base model: Qwen3-VL-4B-Instruct
+# State encoder: MLP
 
 # Model configuration
 model_name: Qwen/Qwen3-VL-4B-Instruct
@@ -68,23 +69,17 @@ state_reconstruction_only_on_dropout: true  # Only add reconstruction when state
 # Encodes K timesteps of robot state history through a neural network
 # and prepends the resulting embeddings to the transformer input sequence
 use_state_encoder: true
-state_encoder_type: conv1d  # "conv1d", "mlp", "transformer", "rnn"
+state_encoder_type: mlp  # "conv1d", "mlp", "transformer", "rnn"
 state_history_len: 10  # Number of past timesteps (K) to encode
 state_encoder_hidden_dim: 256  # Hidden dimension for encoder
 state_encoder_n_output_tokens: 4  # Number of output embedding tokens
 state_encoder_dropout: 0.1  # Dropout for regularization
-# Conv1D encoder specific
-state_encoder_conv_channels:
-- 64
-- 128
-- 256
-state_encoder_conv_kernel_size: 3
 
 # Training split
 validation_split: 0.05
 
 # Training hyperparameters
-batch_size: 3
+batch_size: 2
 gradient_accumulation_steps: 4  # With 8-bit optimizer and no_sync, we have memory for accumulation
 learning_rate: 2.0e-05
 weight_decay: 0.01
@@ -105,7 +100,7 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-convstate
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-mlpstate
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100
@@ -118,7 +113,7 @@ prefetch_factor: 2
 enable_wandb: true
 wandb_project: qwen3-vla-robotwin
 wandb_entity: null
-wandb_run_name: qwen3-h8-stack_two-bspline-convstate
+wandb_run_name: qwen3-h8-stack_two-bspline-mlpstate
 wandb_log_interval: 50
 
 # Mixed precision training (always uses bfloat16)
