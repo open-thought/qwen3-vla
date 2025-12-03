@@ -5,8 +5,9 @@ Prepares batches for multi-modal VLM training with images, text prompts,
 and action token targets.
 """
 
+import random
 import torch
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from prompt_formatter import PromptFormatter
 
@@ -35,6 +36,9 @@ class VLADataCollator:
         n_bins: int = 255,                 # Number of bins for quantization
         state_reconstruction: bool = False,  # Enable state reconstruction auxiliary task
         state_reconstruction_only_on_dropout: bool = True,  # Only add reconstruction when state was dropped
+        include_text_state_in_prompt: bool = True,  # Include robot state as text in prompt
+        image_dropout_all_prob: float = 0.0,  # Probability to drop all images
+        image_dropout_prob: float = 0.0,  # Probability to drop each individual image
     ):
         """
         Args:
@@ -48,12 +52,21 @@ class VLADataCollator:
                 appends tokenized state after actions: [actions] -> [EOT] -> [state] -> [EOT]
             state_reconstruction_only_on_dropout: Only add state reconstruction when
                 state dropout was applied to this sample (default True)
+            include_text_state_in_prompt: Whether to include robot state as text in prompt
+                (default True). Set to False when relying solely on neural state encoder.
+            image_dropout_all_prob: Probability of omitting ALL images from the prompt
+                (default 0.0). Useful for fostering learning from neural state encoder.
+            image_dropout_prob: Probability of omitting each individual image independently
+                (default 0.0). Applied per-image if image_dropout_all_prob doesn't trigger.
         """
         self.processor = processor
         self.tokenizer_type = tokenizer_type
         self.n_bins = n_bins
         self.state_reconstruction = state_reconstruction
         self.state_reconstruction_only_on_dropout = state_reconstruction_only_on_dropout
+        self.include_text_state_in_prompt = include_text_state_in_prompt
+        self.image_dropout_all_prob = image_dropout_all_prob
+        self.image_dropout_prob = image_dropout_prob
 
         # Set token range based on n_bins (both bspline and bin use n_bins tokens)
         action_token_end = self.ACTION_TOKEN_OFFSET + n_bins - 1
@@ -66,6 +79,28 @@ class VLADataCollator:
 
         # Unified prompt formatter (ensures consistency with eval)
         self.prompt_formatter = PromptFormatter()
+
+    def _generate_image_dropout_mask(self) -> Optional[Tuple[bool, bool, bool]]:
+        """
+        Generate an image dropout mask based on configured probabilities.
+
+        Returns:
+            Tuple of 3 booleans (left, right, head) where True means drop the image,
+            or None if no dropout is applied.
+        """
+        # First check if we should drop ALL images
+        if self.image_dropout_all_prob > 0 and random.random() < self.image_dropout_all_prob:
+            return (True, True, True)
+
+        # Otherwise, check individual image dropout
+        if self.image_dropout_prob > 0:
+            drop_left = random.random() < self.image_dropout_prob
+            drop_right = random.random() < self.image_dropout_prob
+            drop_head = random.random() < self.image_dropout_prob
+            if drop_left or drop_right or drop_head:
+                return (drop_left, drop_right, drop_head)
+
+        return None
 
     def _tokenize_state_for_reconstruction(self, discretized_state) -> torch.Tensor:
         """
@@ -106,6 +141,9 @@ class VLADataCollator:
         action_token_sequences = []
 
         for sample in samples:
+            # Generate image dropout mask for this sample
+            image_dropout_mask = self._generate_image_dropout_mask()
+
             # Build conversation using unified prompt formatter
             # This ensures consistency with eval (qwen3_vla_policy.py)
             conversation = self.prompt_formatter.build_conversation(
@@ -116,6 +154,8 @@ class VLADataCollator:
                 robot_type=sample["robot_type"],
                 discretized_state=sample["discretized_state"],
                 state_dropout_mask=sample.get("state_dropout_mask"),  # May be None
+                include_text_state=self.include_text_state_in_prompt,
+                image_dropout_mask=image_dropout_mask,
             )
 
             prompts.append(conversation)

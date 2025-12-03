@@ -63,6 +63,7 @@ class PromptFormatter:
         robot_type: str,
         discretized_state: np.ndarray,
         state_dropout_mask: Optional[np.ndarray] = None,
+        include_text_state: bool = True,
     ) -> str:
         """
         Build the text portion of the prompt.
@@ -72,15 +73,17 @@ class PromptFormatter:
             robot_type: Robot type identifier (e.g., "aloha-agilex")
             discretized_state: State array with values in [0, num_state_bins-1]
             state_dropout_mask: Optional boolean mask for state dropout
+            include_text_state: Whether to include the state as text in the prompt
 
         Returns:
             Formatted prompt text
         """
-        state_str = self.format_state(discretized_state, state_dropout_mask)
-
         prompt_text = f"""Task: {task_description}
-Robot: {robot_type}
-State: [{state_str}]"""
+Robot: {robot_type}"""
+
+        if include_text_state:
+            state_str = self.format_state(discretized_state, state_dropout_mask)
+            prompt_text += f"\nState: [{state_str}]"
 
         return prompt_text
 
@@ -93,6 +96,8 @@ State: [{state_str}]"""
         robot_type: str,
         discretized_state: np.ndarray,
         state_dropout_mask: Optional[np.ndarray] = None,
+        include_text_state: bool = True,
+        image_dropout_mask: Optional[tuple[bool, bool, bool]] = None,
     ) -> list:
         """
         Build the full conversation structure for the model.
@@ -108,6 +113,9 @@ State: [{state_str}]"""
             robot_type: Robot type identifier
             discretized_state: State array with values in [0, num_state_bins-1]
             state_dropout_mask: Optional boolean mask for state dropout
+            include_text_state: Whether to include the state as text in the prompt
+            image_dropout_mask: Optional tuple of 3 booleans (left, right, head) where
+                True means the image should be dropped/omitted from the prompt
 
         Returns:
             Conversation list for processor.apply_chat_template()
@@ -117,20 +125,31 @@ State: [{state_str}]"""
             robot_type=robot_type,
             discretized_state=discretized_state,
             state_dropout_mask=state_dropout_mask,
+            include_text_state=include_text_state,
         )
+
+        # Build content list, optionally omitting images based on dropout mask
+        content = []
+        cameras = [
+            ("Left camera:", left_camera),
+            ("Right camera:", right_camera),
+            ("Head camera:", head_camera),
+        ]
+
+        drop_left, drop_right, drop_head = image_dropout_mask or (False, False, False)
+        drop_flags = [drop_left, drop_right, drop_head]
+
+        for i, (label, image) in enumerate(cameras):
+            if not drop_flags[i]:
+                content.append({"type": "text", "text": label})
+                content.append({"type": "image", "image": image})
+
+        content.append({"type": "text", "text": prompt_text})
 
         conversation = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "Left camera:"},
-                    {"type": "image", "image": left_camera},
-                    {"type": "text", "text": "Right camera:"},
-                    {"type": "image", "image": right_camera},
-                    {"type": "text", "text": "Head camera:"},
-                    {"type": "image", "image": head_camera},
-                    {"type": "text", "text": prompt_text},
-                ],
+                "content": content,
             }
         ]
 

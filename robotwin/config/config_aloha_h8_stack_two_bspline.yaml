@@ -56,13 +56,24 @@ val_use_augmentation: false
 
 # State dropout (to prevent shortcut learning via state)
 # Forces model to rely on images by masking state values with "?"
-state_dropout_prob: 0.5  # 50% chance each state value is replaced with "?"
-state_dropout_full_prob: 0.25  # 25% chance ALL state values are masked
+#state_dropout_prob: 0.5  # 50% chance each state value is replaced with "?"
+#state_dropout_full_prob: 0.25  # 25% chance ALL state values are masked
+
+# Text state in prompt
+# When false, robot state is not included as text in the prompt
+# (useful when relying solely on neural state encoder)
+include_text_state_in_prompt: false
+
+# Image dropout (to foster learning from neural state encoder)
+# image_dropout_all_prob: Probability of omitting ALL images from the prompt
+# image_dropout_prob: Probability of omitting each individual image independently
+image_dropout_all_prob: 0.1  # Probability to drop all images (0.0 = disabled)
+image_dropout_prob: 0.05  # Probability to drop each individual image (0.0 = disabled)
 
 # State reconstruction auxiliary task
 # When state is dropped, model must reconstruct full state from images
 state_reconstruction: true
-state_reconstruction_only_on_dropout: true  # Only add reconstruction when state was dropped
+state_reconstruction_only_on_dropout: false  # Only add reconstruction when state was dropped
 
 # State history encoder configuration
 # Encodes K timesteps of robot state history through a neural network
@@ -105,7 +116,7 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-convstate
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-conv-drop
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100

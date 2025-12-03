@@ -68,6 +68,17 @@ class TrainingConfig:
     state_dropout_prob: float = 0.0  # Probability of dropping out each state value (0.0 = disabled)
     state_dropout_full_prob: float = 0.0  # Probability of dropping ALL state values at once (0.0 = disabled)
 
+    # Text state in prompt
+    # When False, the robot state is not included as text in the prompt
+    # (useful when relying solely on neural state encoder)
+    include_text_state_in_prompt: bool = True
+
+    # Image dropout (to foster learning from neural state encoder)
+    # image_dropout_all_prob: Probability of omitting ALL images from the prompt
+    # image_dropout_prob: Probability of omitting each individual image independently
+    image_dropout_all_prob: float = 0.0  # Probability to drop all images (0.0 = disabled)
+    image_dropout_prob: float = 0.0  # Probability to drop each individual image (0.0 = disabled)
+
     # State reconstruction (auxiliary task to force visual understanding)
     # When enabled with state dropout, appends the full uncorrupted state after actions
     # Sequence: [masked state prompt] → [actions] → [EOT] → [state tokens] → [EOT]

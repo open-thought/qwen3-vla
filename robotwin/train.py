@@ -215,6 +215,9 @@ def create_dataloaders(config: TrainingConfig):
         n_bins=config.n_bins,
         state_reconstruction=config.state_reconstruction,
         state_reconstruction_only_on_dropout=config.state_reconstruction_only_on_dropout,
+        include_text_state_in_prompt=config.include_text_state_in_prompt,
+        image_dropout_all_prob=config.image_dropout_all_prob,
+        image_dropout_prob=config.image_dropout_prob,
     )
 
     # Create dataloaders
