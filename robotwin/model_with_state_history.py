@@ -348,6 +348,35 @@ class Qwen3VLAModelWithStateHistory(nn.Module):
 
         print(f"Model saved to {save_directory}")
 
+    def load_checkpoint(self, checkpoint_path: str):
+        """
+        Load checkpoint weights into this existing model instance.
+
+        Uses load_sharded_checkpoint for efficient loading of sharded safetensor files.
+        Also loads state encoder weights if present.
+
+        Args:
+            checkpoint_path: Path to checkpoint directory
+        """
+        import os
+        from transformers.modeling_utils import load_sharded_checkpoint
+
+        print(f"Loading checkpoint from {checkpoint_path}...")
+
+        # Load base model weights using HuggingFace's sharded checkpoint loader
+        # Use strict=False because lm_head.weight is tied to embed_tokens and not saved separately
+        load_sharded_checkpoint(self.model, checkpoint_path, strict=False)
+        print("Base model weights loaded")
+
+        # Load state encoder weights if present
+        encoder_path = os.path.join(checkpoint_path, "state_encoder.pt")
+        if os.path.exists(encoder_path) and self.state_encoder is not None:
+            print(f"Loading state encoder from {encoder_path}")
+            torch.serialization.add_safe_globals([StateEncoderConfig])
+            encoder_data = torch.load(encoder_path, map_location="cpu")
+            self.state_encoder.load_state_dict(encoder_data["state_dict"])
+            print("State encoder weights loaded")
+
     @classmethod
     def from_pretrained(
         cls,

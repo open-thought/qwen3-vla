@@ -15,13 +15,18 @@ from dataclasses import dataclass
 @dataclass
 class StateEncoderConfig:
     """Configuration for state history encoder."""
-    encoder_type: str = "conv1d"  # "conv1d", "mlp", "transformer", "rnn"
+    encoder_type: str = "conv1d"  # "linear", "conv1d", "mlp", "transformer", "rnn"
     history_len: int = 10  # Number of past timesteps (K)
     state_dim: int = 14  # State dimension (2*6 DoF + 2 grippers)
     hidden_dim: int = 256  # Hidden dimension for encoder
     output_dim: int = 1536  # Output dim (must match Qwen3-VL hidden_size)
     n_output_tokens: int = 4  # Number of output embedding tokens
     dropout: float = 0.0
+
+    # Output projection initialization: normal distribution with this std
+    # Default 0.0 means use 1/sqrt(output_dim) which gives output norm ~1.0
+    # Set to a positive value to override, or negative to use PyTorch default
+    output_proj_init_std: float = 0.0
 
     # Conv1D specific
     conv_channels: List[int] = None  # Default: [64, 128, 256]
@@ -81,6 +86,11 @@ class Conv1DStateEncoder(nn.Module):
 
         # Project to output dimension (no bias to avoid offset that increases norm)
         self.output_proj = nn.Linear(config.conv_channels[-1], config.output_dim, bias=False)
+
+        # Custom Gaussian initialization for output projection to control embedding magnitude
+        if config.output_proj_init_std >= 0:
+            std = config.output_proj_init_std if config.output_proj_init_std > 0 else config.output_dim ** -0.5
+            nn.init.normal_(self.output_proj.weight, mean=0.0, std=std)
 
         # Dropout for regularization
         self.dropout = nn.Dropout(config.dropout)
@@ -145,6 +155,13 @@ class LinearStateEncoder(nn.Module):
 
         # Simple per-timestep projection (like ViT patch embedding)
         self.proj = nn.Linear(config.state_dim, config.output_dim)
+
+        # Custom Gaussian initialization for output projection to control embedding magnitude
+        if config.output_proj_init_std >= 0:
+            std = config.output_proj_init_std if config.output_proj_init_std > 0 else config.output_dim ** -0.5
+            nn.init.normal_(self.proj.weight, mean=0.0, std=std)
+            if self.proj.bias is not None:
+                nn.init.zeros_(self.proj.bias)
 
     def forward(self, state_history: torch.Tensor) -> torch.Tensor:
         """

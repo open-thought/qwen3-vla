@@ -806,22 +806,27 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
                 "Use DCP checkpoints for FSDP training."
             )
 
-        # Load the model using from_pretrained
-        loaded_model = AutoModelForImageTextToText.from_pretrained(
-            str(checkpoint_path),
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-        )
+        # Get the actual model (unwrap DDP if needed)
+        actual_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
 
-        # Copy weights to the existing model
-        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            model.module.load_state_dict(loaded_model.state_dict())
+        # Check if this is a Qwen3VLAModelWithStateHistory checkpoint
+        state_encoder_path = checkpoint_path / "state_encoder.pt"
+        is_state_history_checkpoint = state_encoder_path.exists()
+
+        if is_state_history_checkpoint and isinstance(actual_model, Qwen3VLAModelWithStateHistory):
+            # Use the model's load_checkpoint method for efficient in-place loading
+            print_rank0("Loading Qwen3VLAModelWithStateHistory checkpoint...")
+            actual_model.load_checkpoint(str(checkpoint_path))
         else:
-            model.load_state_dict(loaded_model.state_dict())
-
-        # Free the loaded model
-        del loaded_model
+            # Standard HuggingFace checkpoint loading
+            loaded_model = AutoModelForImageTextToText.from_pretrained(
+                str(checkpoint_path),
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
+            actual_model.load_state_dict(loaded_model.state_dict())
+            del loaded_model
 
         # Load training state if available
         training_state_path = checkpoint_path / "training_state.pt"
