@@ -89,7 +89,7 @@ class Conv1DStateEncoder(nn.Module):
 
         # Custom Gaussian initialization for output projection to control embedding magnitude
         if config.output_proj_init_std >= 0:
-            std = config.output_proj_init_std if config.output_proj_init_std > 0 else config.output_dim ** -0.5
+            std = config.output_proj_init_std if config.output_proj_init_std > 0 else (config.output_dim * config.conv_channels[-1]) ** -0.5
             nn.init.normal_(self.output_proj.weight, mean=0.0, std=std)
 
         # Dropout for regularization
