@@ -194,6 +194,9 @@ class Qwen3VLAModelWithStateHistory(nn.Module):
         Returns:
             Dictionary with loss and logits
         """
+        # Track embedding norms for logging
+        embed_norms = {}
+
         # If we have state history and a state encoder, encode and prepend
         if state_history is not None and self.state_encoder is not None:
             # Get device from model
@@ -209,6 +212,12 @@ class Qwen3VLAModelWithStateHistory(nn.Module):
 
             # Get input embeddings from token IDs
             inputs_embeds = self.model.get_input_embeddings()(input_ids.to(model_device))
+
+            # Compute embedding norms for logging (detached, no grad)
+            with torch.no_grad():
+                # Mean L2 norm per token
+                embed_norms["state_embed_norm"] = state_embeds.norm(dim=-1).mean().item()
+                embed_norms["text_embed_norm"] = inputs_embeds.norm(dim=-1).mean().item()
 
             # Ensure attention_mask and labels are on the right device
             if attention_mask is not None:
@@ -242,10 +251,14 @@ class Qwen3VLAModelWithStateHistory(nn.Module):
                 **kwargs
             )
 
-        return {
+        result = {
             "loss": outputs.loss,
             "logits": outputs.logits,
         }
+        # Add embedding norms if computed
+        if embed_norms:
+            result["embed_norms"] = embed_norms
+        return result
 
     def generate(
         self,
@@ -358,6 +371,8 @@ class Qwen3VLAModelWithStateHistory(nn.Module):
         encoder_path = os.path.join(model_path, "state_encoder.pt")
         if os.path.exists(encoder_path):
             print(f"Loading state encoder from {encoder_path}")
+            # Allow StateEncoderConfig to be loaded (PyTorch 2.6+ requires explicit allowlisting)
+            torch.serialization.add_safe_globals([StateEncoderConfig])
             encoder_data = torch.load(encoder_path, map_location="cpu")
             state_encoder_config = encoder_data["config"]
 

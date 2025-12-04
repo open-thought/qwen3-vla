@@ -14,10 +14,18 @@ import sys
 import os
 from pathlib import Path
 
+# Save original working directory before any changes (for resolving user-provided relative paths)
+ORIGINAL_CWD = Path.cwd()
+
 # Setup paths
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
-ROBOTWIN_DIR = Path("/home/koepf/robotics/RoboTwin")
+
+# RoboTwin directory - configurable via environment variable
+ROBOTWIN_DIR = Path(os.environ.get("ROBOTWIN_DIR", "/home/koepf/robotics/RoboTwin"))
+if not ROBOTWIN_DIR.exists():
+    print(f"Warning: ROBOTWIN_DIR={ROBOTWIN_DIR} does not exist.")
+    print("Set the ROBOTWIN_DIR environment variable to the correct path.")
 
 # Change to RoboTwin directory (required for relative path imports in RoboTwin)
 os.chdir(ROBOTWIN_DIR)
@@ -27,6 +35,14 @@ sys.path.insert(0, str(ROBOTWIN_DIR))
 sys.path.insert(0, str(ROBOTWIN_DIR / "policy"))
 sys.path.insert(0, str(ROBOTWIN_DIR / "description" / "utils"))
 sys.path.insert(0, str(PROJECT_DIR))
+
+
+def resolve_path(path: Path | str) -> Path:
+    """Resolve a path relative to the original working directory."""
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return ORIGINAL_CWD / path
 
 import argparse
 import yaml
@@ -45,7 +61,7 @@ from eval.video_recorder import MultiCameraRecorder, get_observer_rgb
 from train_config import TrainingConfig
 
 
-def load_training_config(checkpoint_path: str) -> TrainingConfig:
+def load_training_config(checkpoint_path: Path | str) -> TrainingConfig:
     """
     Load training configuration from checkpoint directory.
 
@@ -151,7 +167,7 @@ def run_evaluation(
     task_config_name: str = "demo_clean",
     instruction_type: str = "unseen",
     record_video: bool = True,
-    video_output_dir: str = "eval_videos",
+    video_output_dir: Path | str = "eval_videos",
     seed: int = 42,
     execute_steps: int = 1,
     use_builtin_video: bool = False,
@@ -201,11 +217,14 @@ def run_evaluation(
     # Load task environment
     TASK_ENV = class_decorator(task_name)
 
+    # Ensure video_output_dir is a Path
+    video_output_dir = Path(video_output_dir)
+
     # Video recorder (multi-camera)
     recorder = None
     if record_video and not use_builtin_video:
         recorder = MultiCameraRecorder(
-            output_dir=f"{video_output_dir}/{task_name}",
+            output_dir=video_output_dir / task_name,
             fps=10,
         )
 
@@ -213,7 +232,7 @@ def run_evaluation(
     builtin_video_dir = None
     video_size = None
     if use_builtin_video:
-        builtin_video_dir = Path(video_output_dir) / task_name
+        builtin_video_dir = video_output_dir / task_name
         builtin_video_dir.mkdir(parents=True, exist_ok=True)
         # Get camera resolution for ffmpeg
         head_camera_type = config.get("camera", {}).get("head_camera_type", "default")
@@ -305,6 +324,7 @@ def run_evaluation(
 
         # Initial observation
         observation = TASK_ENV.get_obs()
+        model.update_state_history(observation)  # Add initial state to history buffer
         step = 0
 
         print(f"\n  Episode {episode_count + 1}/{num_episodes} (seed={now_seed})")
@@ -339,6 +359,7 @@ def run_evaluation(
             for i in range(steps_to_execute):
                 TASK_ENV.take_action(actions[i], action_type='qpos')
                 observation = TASK_ENV.get_obs()
+                model.update_state_history(observation)  # Update state history after each action
 
                 # Record frame after each action (not just at policy call)
                 if recorder and i < steps_to_execute - 1:  # Skip last frame, it's recorded at loop start
@@ -513,7 +534,7 @@ def main():
 
     # Other arguments
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--device", type=str, default="cuda:1", help="Device to use (e.g., cuda:0, cuda:1)")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (e.g., cuda:0, cuda:1)")
     parser.add_argument(
         "--execute_steps", "-e",
         type=int,
@@ -614,6 +635,9 @@ def main():
 
     args = parser.parse_args()
 
+    # Resolve checkpoint path first (needed for loading training config)
+    args.checkpoint = resolve_path(args.checkpoint)
+
     # Load training config if requested
     training_config = None
     if args.auto_config:
@@ -655,11 +679,17 @@ def main():
                 args.gripper_threshold = training_config.gripper_open_threshold
                 print(f"  gripper_threshold: {args.gripper_threshold}")
 
+    # Resolve remaining user-provided paths relative to original working directory
+    # (checkpoint was already resolved above for loading training config)
+    args.norm_stats = resolve_path(args.norm_stats)
+    args.output_dir = resolve_path(args.output_dir)
+    args.video_output_dir = resolve_path(args.video_output_dir)
+
     # Handle video flag
     record_video = args.record_video and not args.no_video
 
     # Create output directory
-    output_dir = Path(args.output_dir)
+    output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # SAPIEN test (required by RoboTwin)
@@ -702,6 +732,12 @@ def main():
         print(f"  State encoder enabled: {training_config.state_encoder_type}")
         print(f"    history_len: {training_config.state_history_len}")
         print(f"    n_output_tokens: {training_config.state_encoder_n_output_tokens}")
+
+    # Add include_text_state setting from training config if available
+    if training_config:
+        include_text_state = getattr(training_config, 'include_text_state_in_prompt', True)
+        model_args["include_text_state"] = include_text_state
+        print(f"  include_text_state: {include_text_state}")
 
     model = get_model(model_args)
 

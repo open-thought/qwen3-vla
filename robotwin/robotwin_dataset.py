@@ -435,17 +435,21 @@ class RoboTwinVLADataset(Dataset):
         left_gripper = episode_data["left_gripper"]  # (T,)
         right_gripper = episode_data["right_gripper"]  # (T,)
 
-        # Apply gripper binarization if enabled (before stacking)
+        # Keep original continuous grippers for state history (consistent with eval)
+        full_grippers_continuous = np.stack([left_gripper, right_gripper], axis=1)  # (T, 2)
+
+        # Apply gripper binarization if enabled (for action targets only)
         # Binarization is done on the full episode to enable forward-looking relabeling
         if self.binarize_grippers:
-            left_gripper = self._binarize_gripper_sequence(left_gripper)
-            right_gripper = self._binarize_gripper_sequence(right_gripper)
-
-        full_grippers = np.stack([left_gripper, right_gripper], axis=1)  # (T, 2)
+            left_gripper_bin = self._binarize_gripper_sequence(left_gripper)
+            right_gripper_bin = self._binarize_gripper_sequence(right_gripper)
+            full_grippers = np.stack([left_gripper_bin, right_gripper_bin], axis=1)  # (T, 2)
+        else:
+            full_grippers = full_grippers_continuous
 
         num_timesteps = len(full_joints)
         current_state = full_joints[timestep].astype(np.float32)  # (2*dof,)
-        current_grippers = full_grippers[timestep].astype(np.float32)  # (2,)
+        current_grippers = full_grippers_continuous[timestep].astype(np.float32)  # (2,) - continuous for consistency with eval
 
         # Get future states for delta actions (joints + grippers)
         if self.pad_action_horizon:
@@ -502,11 +506,11 @@ class RoboTwinVLADataset(Dataset):
         # Generate state dropout mask if enabled
         state_dropout_mask = self._generate_state_dropout_mask(len(discretized_state))
 
-        # Extract state history if enabled
+        # Extract state history if enabled (uses continuous grippers to match eval)
         state_history = None
         if self.state_history_len > 0:
             state_history = self._extract_state_history(
-                full_joints, full_grippers, timestep, robot_type
+                full_joints, full_grippers_continuous, timestep, robot_type
             )
 
         # Tokenize delta actions

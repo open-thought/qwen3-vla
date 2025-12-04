@@ -78,6 +78,8 @@ class Qwen3VLAPolicy:
         state_encoder_dropout: float = 0.1,
         state_encoder_conv_channels: list = None,
         state_encoder_conv_kernel_size: int = 3,
+        # Prompt settings
+        include_text_state: bool = True,
     ):
         """
         Initialize the Qwen3-VLA policy.
@@ -112,6 +114,7 @@ class Qwen3VLAPolicy:
             state_encoder_dropout: Dropout rate for encoder
             state_encoder_conv_channels: List of conv channels for Conv1D encoder
             state_encoder_conv_kernel_size: Kernel size for Conv1D encoder
+            include_text_state: Whether to include state in text prompt (set to False when using state encoder)
         """
         self.checkpoint_path = checkpoint_path
         self.action_horizon = action_horizon
@@ -132,6 +135,7 @@ class Qwen3VLAPolicy:
         # State encoder settings
         self.use_state_encoder = use_state_encoder
         self.state_history_len = state_history_len
+        self.include_text_state = include_text_state
 
         # Timing statistics
         self.total_generate_time = 0.0
@@ -310,6 +314,32 @@ class Qwen3VLAPolicy:
             joint_action["right_gripper"]
         ])
 
+    def update_state_history(self, observation: dict) -> None:
+        """
+        Update state history buffer with new observation.
+
+        Call this after executing each action step during evaluation to maintain
+        dense state history matching training (where states are recorded at every
+        timestep).
+
+        Args:
+            observation: RoboTwin observation dict
+        """
+        if self.state_history_buffer is None:
+            return
+
+        # Extract state and grippers from observation
+        state = self._get_state_vector(observation)
+        grippers = self._get_gripper_state(observation)
+
+        # Normalize (must match training format)
+        normalized_state = self.normalizer.normalize_state(state, self.robot_type)
+        normalized_grippers = self.normalizer.normalize_grippers(grippers, self.robot_type)
+
+        # Concatenate and add to buffer
+        normalized_state_with_grippers = np.concatenate([normalized_state, normalized_grippers])
+        self.state_history_buffer.append(normalized_state_with_grippers.copy())
+
     def _build_prompt_text(
         self,
         instruction: str,
@@ -330,6 +360,7 @@ class Qwen3VLAPolicy:
             task_description=instruction,
             robot_type=self.robot_type,
             discretized_state=discretized_state,
+            include_text_state=self.include_text_state,
         )
 
     def get_action(
@@ -381,9 +412,8 @@ class Qwen3VLAPolicy:
         # Concatenate normalized state and grippers: (2*dof + 2,) to match training
         normalized_state_with_grippers = np.concatenate([normalized_state, normalized_grippers])
 
-        # Update state history buffer if using state encoder
-        if self.state_history_buffer is not None:
-            self.state_history_buffer.append(normalized_state_with_grippers.copy())
+        # Note: State history buffer is updated externally via update_state_history()
+        # to ensure proper timing (before get_action and after each action step).
 
         # Discretize to [0, 255] for prompt
         discretized_state = discretize_normalized_values(normalized_state_with_grippers, num_bins=256)
@@ -396,6 +426,7 @@ class Qwen3VLAPolicy:
             task_description=instruction,
             robot_type=self.robot_type,
             discretized_state=discretized_state,
+            include_text_state=self.include_text_state,
         )
 
         # Process inputs
@@ -464,7 +495,13 @@ class Qwen3VLAPolicy:
 
         # Extract generated tokens (remove input tokens)
         input_len = inputs["input_ids"].shape[1]
-        generated_tokens = outputs[0, input_len:].cpu().tolist()
+        if self.use_state_encoder:
+            # When using state encoder with inputs_embeds, HuggingFace's generate
+            # returns only generated tokens (not the full input+generated sequence).
+            # The output starts from position 0 with generated tokens directly.
+            generated_tokens = outputs[0].cpu().tolist()
+        else:
+            generated_tokens = outputs[0, input_len:].cpu().tolist()
         num_tokens = len(generated_tokens)
 
         # Update timing statistics
@@ -526,7 +563,10 @@ class Qwen3VLAPolicy:
                 print(f"    {self.tokenizer_type.upper()} tokens ({len(action_tokens)}): {tokens_no_offset}")
             if self.num_generate_calls <= 2:
                 # Print full prompt on first few calls
-                prompt_text = self.prompt_formatter.build_prompt_text(instruction, self.robot_type, discretized_state)
+                prompt_text = self.prompt_formatter.build_prompt_text(
+                    instruction, self.robot_type, discretized_state,
+                    include_text_state=self.include_text_state
+                )
                 print(f"    Prompt: {prompt_text}")
 
         if len(action_tokens) == 0:
@@ -732,6 +772,9 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
     state_encoder_conv_channels = usr_args.get("state_encoder_conv_channels", None)
     state_encoder_conv_kernel_size = usr_args.get("state_encoder_conv_kernel_size", 3)
 
+    # Prompt settings
+    include_text_state = usr_args.get("include_text_state", True)
+
     _policy_instance = Qwen3VLAPolicy(
         checkpoint_path=checkpoint_path,
         norm_stats_path=norm_stats_path,
@@ -760,6 +803,8 @@ def get_model(usr_args: dict) -> Qwen3VLAPolicy:
         state_encoder_dropout=state_encoder_dropout,
         state_encoder_conv_channels=state_encoder_conv_channels,
         state_encoder_conv_kernel_size=state_encoder_conv_kernel_size,
+        # Prompt settings
+        include_text_state=include_text_state,
     )
 
     return _policy_instance

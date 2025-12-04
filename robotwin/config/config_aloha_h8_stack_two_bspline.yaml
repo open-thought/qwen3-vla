@@ -67,8 +67,8 @@ include_text_state_in_prompt: false
 # Image dropout (to foster learning from neural state encoder)
 # image_dropout_all_prob: Probability of omitting ALL images from the prompt
 # image_dropout_prob: Probability of omitting each individual image independently
-image_dropout_all_prob: 0.1  # Probability to drop all images (0.0 = disabled)
-image_dropout_prob: 0.05  # Probability to drop each individual image (0.0 = disabled)
+image_dropout_all_prob: 0.5  # Probability to drop all images (0.0 = disabled)
+image_dropout_prob: 0.1  # Probability to drop each individual image (0.0 = disabled)
 
 # State reconstruction auxiliary task
 # When state is dropped, model must reconstruct full state from images
@@ -80,10 +80,10 @@ state_reconstruction_only_on_dropout: false  # Only add reconstruction when stat
 # and prepends the resulting embeddings to the transformer input sequence
 use_state_encoder: true
 state_encoder_type: conv1d  # "conv1d", "mlp", "transformer", "rnn"
-state_history_len: 10  # Number of past timesteps (K) to encode
+state_history_len: 24  # Number of past timesteps (K) to encode
 state_encoder_hidden_dim: 256  # Hidden dimension for encoder
-state_encoder_n_output_tokens: 4  # Number of output embedding tokens
-state_encoder_dropout: 0.1  # Dropout for regularization
+state_encoder_n_output_tokens: 24  # Number of output embedding tokens
+state_encoder_dropout: 0.0  # Dropout for regularization
 # Conv1D encoder specific
 state_encoder_conv_channels:
 - 64
@@ -97,7 +97,7 @@ validation_split: 0.05
 # Training hyperparameters
 batch_size: 3
 gradient_accumulation_steps: 4  # With 8-bit optimizer and no_sync, we have memory for accumulation
-learning_rate: 2.0e-05
+learning_rate: 3.0e-05
 weight_decay: 0.01
 max_grad_norm: 1.0
 max_steps: 100000
@@ -116,7 +116,7 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-conv-drop
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-conv-drop2
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100

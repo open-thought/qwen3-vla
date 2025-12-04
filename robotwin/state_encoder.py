@@ -21,7 +21,7 @@ class StateEncoderConfig:
     hidden_dim: int = 256  # Hidden dimension for encoder
     output_dim: int = 1536  # Output dim (must match Qwen3-VL hidden_size)
     n_output_tokens: int = 4  # Number of output embedding tokens
-    dropout: float = 0.1
+    dropout: float = 0.0
 
     # Conv1D specific
     conv_channels: List[int] = None  # Default: [64, 128, 256]
@@ -79,8 +79,8 @@ class Conv1DStateEncoder(nn.Module):
         # Adaptive pooling to get exactly n_output_tokens
         self.pool = nn.AdaptiveAvgPool1d(config.n_output_tokens)
 
-        # Project to output dimension
-        self.output_proj = nn.Linear(config.conv_channels[-1], config.output_dim)
+        # Project to output dimension (no bias to avoid offset that increases norm)
+        self.output_proj = nn.Linear(config.conv_channels[-1], config.output_dim, bias=False)
 
         # Dropout for regularization
         self.dropout = nn.Dropout(config.dropout)
@@ -111,11 +111,51 @@ class Conv1DStateEncoder(nn.Module):
         # Project to output dimension
         x = self.output_proj(x)  # (batch, n_output_tokens, output_dim)
 
-        # Apply dropout and layer norm
+        # Apply dropout (layer norm disabled - let transformer's RMSNorm handle normalization)
         x = self.dropout(x)
-        x = self.output_norm(x)
+        # x = self.output_norm(x)
 
         return x
+
+
+class LinearStateEncoder(nn.Module):
+    """
+    Simple linear projection encoder for state history.
+
+    Projects each timestep independently to the output dimension,
+    letting the transformer handle temporal relationships via
+    self-attention and positional embeddings.
+
+    Similar to ViT's linear patch projection - minimal preprocessing,
+    maximum use of transformer capabilities.
+
+    Input: (batch, K, state_dim) - K timesteps of normalized state
+    Output: (batch, K, output_dim) - one embedding per timestep
+    """
+
+    def __init__(self, config: StateEncoderConfig):
+        super().__init__()
+        self.config = config
+
+        # Linear encoder outputs one token per timestep, so these must match
+        assert config.history_len == config.n_output_tokens, (
+            f"LinearStateEncoder requires history_len == n_output_tokens, "
+            f"got {config.history_len} != {config.n_output_tokens}"
+        )
+
+        # Simple per-timestep projection (like ViT patch embedding)
+        self.proj = nn.Linear(config.state_dim, config.output_dim)
+
+    def forward(self, state_history: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            state_history: (batch, K, state_dim) normalized state history
+
+        Returns:
+            (batch, K, output_dim) embeddings - one per timestep
+        """
+        # Project each timestep: (batch, K, state_dim) -> (batch, K, output_dim)
+        return self.proj(state_history)
 
 
 class MLPStateEncoder(nn.Module):
@@ -344,6 +384,7 @@ def create_state_encoder(config: StateEncoderConfig) -> nn.Module:
         State encoder module
     """
     encoder_classes = {
+        "linear": LinearStateEncoder,
         "conv1d": Conv1DStateEncoder,
         "mlp": MLPStateEncoder,
         "transformer": TransformerStateEncoder,

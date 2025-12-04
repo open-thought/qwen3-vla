@@ -500,7 +500,7 @@ def compute_gradient_norms(model, device, use_fsdp: bool = False) -> dict:
 
 
 def train_step(model, batch, device, use_amp, debug=False):
-    """Single training step."""
+    """Single training step. Returns (loss, embed_norms) where embed_norms may be None."""
     rank = get_rank()
 
     if debug:
@@ -531,7 +531,10 @@ def train_step(model, batch, device, use_amp, debug=False):
         print(f"[Rank {rank}] Backward done")
         print(f"[Rank {rank}] GPU memory after backward: {torch.cuda.memory_allocated(device) / 1e9:.2f} GB allocated, {torch.cuda.memory_reserved(device) / 1e9:.2f} GB reserved")
 
-    return loss.item()
+    # Extract embed norms if present
+    embed_norms = outputs.get("embed_norms", None)
+
+    return loss.item(), embed_norms
 
 
 @torch.no_grad()
@@ -1227,6 +1230,11 @@ def train(config: TrainingConfig):
     best_val_loss = float('inf')
     epoch = 0
 
+    # Running averages for embed norms
+    running_state_embed_norm = 0.0
+    running_text_embed_norm = 0.0
+    embed_norm_count = 0
+
     pbar = tqdm(initial=start_step, total=config.max_steps, desc="Training") if is_main_process() else None
 
     while global_step < config.max_steps:
@@ -1249,12 +1257,18 @@ def train(config: TrainingConfig):
 
             if is_ddp and is_accumulation_step:
                 with model.no_sync():
-                    loss = train_step(model, batch, device, config.use_amp, debug=debug_step)
+                    loss, embed_norms = train_step(model, batch, device, config.use_amp, debug=debug_step)
             else:
-                loss = train_step(model, batch, device, config.use_amp, debug=debug_step)
+                loss, embed_norms = train_step(model, batch, device, config.use_amp, debug=debug_step)
 
             running_loss += loss
             micro_step += 1
+
+            # Accumulate embed norms for logging
+            if embed_norms is not None:
+                running_state_embed_norm += embed_norms.get("state_embed_norm", 0.0)
+                running_text_embed_norm += embed_norms.get("text_embed_norm", 0.0)
+                embed_norm_count += 1
 
             # Gradient accumulation complete
             if micro_step % config.gradient_accumulation_steps == 0:
@@ -1339,9 +1353,20 @@ def train(config: TrainingConfig):
                             log_dict["train/learning_rate_vision"] = lrs[1]
                         else:
                             log_dict["train/learning_rate"] = lrs[0]
+
+                        # Add embed norms if available
+                        if embed_norm_count > 0:
+                            log_dict["embed_norm/state"] = running_state_embed_norm / embed_norm_count
+                            log_dict["embed_norm/text"] = running_text_embed_norm / embed_norm_count
+                            log_dict["embed_norm/ratio"] = (running_state_embed_norm / embed_norm_count) / max(running_text_embed_norm / embed_norm_count, 1e-8)
+
                         wandb.log(log_dict, step=global_step)
 
                     running_loss = 0
+                    # Reset embed norm accumulators
+                    running_state_embed_norm = 0.0
+                    running_text_embed_norm = 0.0
+                    embed_norm_count = 0
 
                 # Validation
                 if global_step % config.val_interval == 0:
