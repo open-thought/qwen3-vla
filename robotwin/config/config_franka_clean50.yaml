@@ -9,7 +9,6 @@ new_vocab_size: 153984
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_h16.json
-episode_lengths_path: data/robotwin_episode_lengths.json
 valid_timesteps_path: data/robotwin_valid_timesteps.json
 action_horizon: 16
 pad_action_horizon: true  # Whether to pad action sequences by repeating final state (true) or use variable-length sequences (false)

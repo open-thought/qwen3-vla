@@ -24,19 +24,24 @@ First, extract delta actions from the dataset and compute normalization statisti
 python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions.hdf5 \
-    --episode-lengths-output data/robotwin_episode_lengths.json \
     --action-horizon 16
 
 # Compute normalization statistics per robot type
 python compute_norm_stats.py \
     --delta-actions data/robotwin_delta_actions.hdf5 \
     --output data/robotwin_norm_stats.json
+
+# Compute valid timesteps (filters out idle frames)
+python compute_idle_masks.py \
+    --dataset-root /mnt/robotwin/dataset \
+    --output data/robotwin_valid_timesteps.json \
+    --action-horizon 16
 ```
 
 This creates:
 - `data/robotwin_delta_actions.hdf5` - Extracted delta actions for normalization
-- `data/robotwin_episode_lengths.json` - Actual episode lengths (required for training)
 - `data/robotwin_norm_stats.json` - Normalization statistics with 1%/99% percentiles:
+- `data/robotwin_valid_timesteps.json` - Valid (non-idle) timesteps per episode
   - Robot states (current joint positions)
   - Delta actions (future movements)
   - Gripper states
@@ -59,7 +64,7 @@ model_name: "Qwen/Qwen3-VL-2B-Instruct"
 # Dataset
 dataset_root: "/mnt/robotwin/dataset"
 norm_stats_path: "data/robotwin_norm_stats.json"
-episode_lengths_path: "data/robotwin_episode_lengths.json"
+valid_timesteps_path: "data/robotwin_valid_timesteps.json"
 action_horizon: 50
 image_size: [320, 240]  # Native RoboTwin resolution
 
@@ -163,7 +168,8 @@ robotwin/
 
 data/
 ├── robotwin_delta_actions.hdf5  # Extracted delta actions
-└── robotwin_norm_stats.json     # Normalization statistics
+├── robotwin_norm_stats.json     # Normalization statistics
+└── robotwin_valid_timesteps.json # Valid timesteps per episode
 
 checkpoints/
 └── qwen3-vla-robotwin/          # Training checkpoints

@@ -42,7 +42,7 @@ def test_full_action_pipeline(
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
         norm_stats_path="data/robotwin_norm_stats_h16.json",
-        episode_lengths_path="data/robotwin_episode_lengths.json",
+        valid_timesteps_path="data/robotwin_valid_timesteps.json",
         action_horizon=16,
         image_size=(320, 240),
         tasks=["beat_block_hammer"],
@@ -246,7 +246,6 @@ def test_multiple_samples(
     dataset = RoboTwinVLADataset(
         dataset_root="/mnt/robotwin/dataset",
         norm_stats_path="data/robotwin_norm_stats_h8.json",
-        episode_lengths_path="data/robotwin_episode_lengths.json",
         valid_timesteps_path="data/robotwin_valid_timesteps_h8.json",
         action_horizon=8,
         image_size=(320, 240),

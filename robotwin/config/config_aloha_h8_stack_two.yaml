@@ -26,7 +26,6 @@ gripper_closed_threshold: 0.3  # Values < this are considered closed (0.0)
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_h8.json
-episode_lengths_path: data/robotwin_episode_lengths_stack_blocks_two.json
 valid_timesteps_path: data/robotwin_valid_timesteps_stack_blocks_two.json
 action_horizon: 8
 pad_action_horizon: false  # Use variable-length sequences for better data quality

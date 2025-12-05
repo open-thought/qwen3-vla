@@ -20,7 +20,7 @@ fsdp_limit_all_gathers: true
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_test.json
-episode_lengths_path: data/robotwin_episode_lengths_test.json
+valid_timesteps_path: data/test_valid_timesteps.json
 action_horizon: 8
 pad_action_horizon: false
 image_size:

@@ -45,8 +45,7 @@ class TrainingConfig:
     # Dataset configuration
     dataset_root: str = "/mnt/robotwin/dataset"
     norm_stats_path: str = "data/robotwin_norm_stats.json"
-    episode_lengths_path: str = "data/robotwin_episode_lengths.json"
-    valid_timesteps_path: Optional[str] = None
+    valid_timesteps_path: str = "data/robotwin_valid_timesteps.json"
     action_horizon: int = 50
     pad_action_horizon: bool = False  # Pad action sequences by repeating final state (True) or use variable-length (False)
     image_size: tuple[int, int] = (320, 240)  # (width, height) - native RoboTwin resolution
@@ -92,6 +91,7 @@ class TrainingConfig:
     use_state_encoder: bool = False  # Enable neural state history encoding
     state_encoder_type: str = "conv1d"  # "conv1d", "mlp", "transformer", "rnn"
     state_history_len: int = 10  # Number of past timesteps (K) to encode
+    state_history_filter_valid_prob: float = 0.0  # Prob to filter history to valid timesteps only
     state_encoder_hidden_dim: int = 256  # Hidden dimension for encoder
     state_encoder_n_output_tokens: int = 4  # Number of output embedding tokens
     state_encoder_dropout: float = 0.1  # Dropout for regularization

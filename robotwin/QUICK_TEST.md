@@ -25,7 +25,6 @@ Extract delta actions and compute statistics for the test subset only:
 python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions_test.hdf5 \
-    --episode-lengths-output data/robotwin_episode_lengths_test.json \
     --action-horizon 16 \
     --robot-types franka \
     --variants clean_50 \
@@ -35,12 +34,21 @@ python extract_delta_actions.py \
 python compute_norm_stats.py \
     --delta-actions data/robotwin_delta_actions_test.hdf5 \
     --output data/robotwin_norm_stats_test.json
+
+# Compute valid timesteps for the test subset
+python compute_idle_masks.py \
+    --dataset-root /mnt/robotwin/dataset \
+    --output data/test_valid_timesteps.json \
+    --action-horizon 16 \
+    --robot-types franka \
+    --variants clean_50 \
+    --tasks adjust_bottle
 ```
 
 This creates:
 - `data/robotwin_delta_actions_test.hdf5` - Extracted delta actions
-- `data/robotwin_episode_lengths_test.json` - Actual episode lengths
 - `data/robotwin_norm_stats_test.json` - Normalization statistics for Franka only
+- `data/test_valid_timesteps.json` - Valid timesteps for test episodes
 
 The test configuration (`config/config_test.yaml`) is already configured to use these files.
 
@@ -100,12 +108,17 @@ Once the test run completes successfully, proceed to full training:
 python extract_delta_actions.py \
     --dataset-root /mnt/robotwin/dataset \
     --output data/robotwin_delta_actions.hdf5 \
-    --episode-lengths-output data/robotwin_episode_lengths.json \
     --action-horizon 16
 
 python compute_norm_stats.py \
     --delta-actions data/robotwin_delta_actions.hdf5 \
     --output data/robotwin_norm_stats.json
+
+# Compute valid timesteps for full dataset
+python compute_idle_masks.py \
+    --dataset-root /mnt/robotwin/dataset \
+    --output data/robotwin_valid_timesteps.json \
+    --action-horizon 16
 
 # Generate default config
 python train_config.py

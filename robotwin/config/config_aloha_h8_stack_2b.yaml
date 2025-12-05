@@ -3,10 +3,9 @@
 # Using BSplineTokenizer with 255 bins and symmetric delta normalization
 # BSpline provides smooth trajectory encoding with 50% fewer tokens than Bin
 # Base model: Qwen3-VL-4B-Instruct
-# State encoder: MLP
 
 # Model configuration
-model_name: Qwen/Qwen3-VL-4B-Instruct
+model_name: Qwen/Qwen3-VL-2B-Instruct
 original_vocab_size: 151936
 new_vocab_size: 152256  # 151936 + 257 = 152193, rounded up to next 64
 tokenizer_type: bspline  # "bspline" or "bin"
@@ -32,7 +31,7 @@ gripper_closed_threshold: 0.3  # Values < this are considered closed (0.0)
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_h8.json
-valid_timesteps_path: data/robotwin_valid_timesteps_stack_blocks_two.json
+valid_timesteps_path: data/robotwin_valid_timesteps_stack_blocks_two_v3.json
 action_horizon: 8
 pad_action_horizon: false  # Use variable-length sequences for better data quality
 image_size:
@@ -67,8 +66,8 @@ include_text_state_in_prompt: false
 # Image dropout (to foster learning from neural state encoder)
 # image_dropout_all_prob: Probability of omitting ALL images from the prompt
 # image_dropout_prob: Probability of omitting each individual image independently
-image_dropout_all_prob: 0.1  # Probability to drop all images (0.0 = disabled)
-image_dropout_prob: 0.05  # Probability to drop each individual image (0.0 = disabled)
+image_dropout_all_prob: 0.2  # Probability to drop all images (0.0 = disabled)
+image_dropout_prob: 0.1  # Probability to drop each individual image (0.0 = disabled)
 
 # State reconstruction auxiliary task
 # When state is dropped, model must reconstruct full state from images
@@ -79,19 +78,26 @@ state_reconstruction_only_on_dropout: false  # Only add reconstruction when stat
 # Encodes K timesteps of robot state history through a neural network
 # and prepends the resulting embeddings to the transformer input sequence
 use_state_encoder: true
-state_encoder_type: mlp  # "conv1d", "mlp", "transformer", "rnn"
-state_history_len: 10  # Number of past timesteps (K) to encode
+state_encoder_type: conv1d  # "conv1d", "mlp", "transformer", "rnn"
+state_history_len: 24  # Number of past timesteps (K) to encode
+state_history_filter_valid_prob: 0.8  # Prob to filter history to valid timesteps only
 state_encoder_hidden_dim: 256  # Hidden dimension for encoder
-state_encoder_n_output_tokens: 4  # Number of output embedding tokens
-state_encoder_dropout: 0.1  # Dropout for regularization
+state_encoder_n_output_tokens: 24  # Number of output embedding tokens
+state_encoder_dropout: 0.0  # Dropout for regularization
+# Conv1D encoder specific
+state_encoder_conv_channels:
+- 64
+- 128
+- 256
+state_encoder_conv_kernel_size: 3
 
 # Training split
 validation_split: 0.05
 
 # Training hyperparameters
-batch_size: 2
+batch_size: 6
 gradient_accumulation_steps: 4  # With 8-bit optimizer and no_sync, we have memory for accumulation
-learning_rate: 2.0e-05
+learning_rate: 3.0e-05
 weight_decay: 0.01
 max_grad_norm: 1.0
 max_steps: 100000
@@ -110,7 +116,7 @@ lora_target_modules:
 - o_proj
 
 # Checkpointing and evaluation
-checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack_two-bspline-mlp-drop
+checkpoint_dir: /mnt/robotwin/checkpoints/qwen3-h8-stack-2b
 save_interval: 10000
 val_interval: 5000
 max_val_batches: 100
@@ -123,7 +129,7 @@ prefetch_factor: 2
 enable_wandb: true
 wandb_project: qwen3-vla-robotwin
 wandb_entity: null
-wandb_run_name: qwen3-h8-stack_two-bspline-mlpstate
+wandb_run_name: qwen3-h8-stack-2b
 wandb_log_interval: 50
 
 # Mixed precision training (always uses bfloat16)

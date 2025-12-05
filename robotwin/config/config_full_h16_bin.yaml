@@ -11,7 +11,6 @@ tokenizer_type: bin  # "fast" or "bin"
 # Dataset configuration
 dataset_root: /mnt/robotwin/dataset
 norm_stats_path: data/robotwin_norm_stats_h16.json
-episode_lengths_path: data/robotwin_episode_lengths.json
 valid_timesteps_path: data/robotwin_valid_timesteps.json
 action_horizon: 16
 pad_action_horizon: false  # Use variable-length sequences for better data quality
