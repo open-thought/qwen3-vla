@@ -2,8 +2,11 @@
 Compute idle frame masks for RoboTwin dataset.
 
 For each episode, identifies timesteps where the robot is idle (not moving).
-A frame is considered valid (non-idle) only if ALL timesteps in the action horizon
-have at least one joint with max(abs(delta)) >= threshold.
+A frame is considered valid (non-idle) if:
+1. The IMMEDIATE NEXT action (t+1 - t) has at least one joint with
+   max(abs(delta)) >= threshold (filters out stationary frames)
+2. There are at least action_horizon future timesteps available
+   (ensures B-spline tokenizer has enough data points)
 
 The output is a JSON file mapping episode keys to lists of valid (non-idle) timesteps.
 This can be used by the dataloader to skip idle frames during training.
@@ -103,26 +106,26 @@ def compute_idle_masks(
             # Create episode key
             episode_key = f"{ep_meta.task_name}/{ep_meta.robot_type}_{ep_meta.variant}/episode{ep_meta.episode_idx}"
 
-            # For each timestep, compute max delta over the action horizon
+            # For each timestep, check if the immediate next action is above threshold
+            # Only include frames that have a full action horizon available
             ep_valid_timesteps = []
 
-            for t in range(num_timesteps - 1):  # Last timestep has no future
-                # Get available future timesteps (need +1 to compute consecutive deltas)
-                available = min(action_horizon, num_timesteps - t - 1)
-                horizon_states = full_state[t:t + 1 + available]  # includes current state
+            # Max timestep that has full action horizon available
+            # Need at least action_horizon future timesteps: t+1, t+2, ..., t+action_horizon
+            max_valid_t = num_timesteps - action_horizon - 1
 
-                # Compute consecutive delta actions: state[i+1] - state[i]
-                delta_actions = horizon_states[1:] - horizon_states[:-1]
+            for t in range(max_valid_t + 1):  # 0 to max_valid_t inclusive
+                # Compute immediate next delta: state[t+1] - state[t]
+                immediate_delta = full_state[t + 1] - full_state[t]
 
-                # Check if all timesteps have movement above threshold
-                # For each timestep, get max absolute delta across all joints
-                max_delta_per_timestep = np.abs(delta_actions).max(axis=1)
+                # Check if max absolute delta across all joints exceeds threshold
+                max_delta = np.abs(immediate_delta).max()
 
-                # Frame is valid only if ALL timesteps have change above threshold
-                all_active = np.all(max_delta_per_timestep >= idle_threshold)
+                # Frame is valid if the immediate next action has movement
+                is_active = max_delta >= idle_threshold
 
                 total_frames += 1
-                if all_active:
+                if is_active:
                     active_frames += 1
                     ep_valid_timesteps.append(t)
                 else:
@@ -147,8 +150,8 @@ def compute_idle_masks(
     print("IDLE FRAME ANALYSIS")
     print("=" * 60)
     print(f"Total frames analyzed: {total_frames}")
-    print(f"Idle frames (max_delta < {idle_threshold}): {idle_frames} ({idle_frames / total_frames * 100:.1f}%)")
-    print(f"Active frames: {active_frames} ({active_frames / total_frames * 100:.1f}%)")
+    print(f"Idle frames (immediate delta < {idle_threshold}): {idle_frames} ({idle_frames / total_frames * 100:.1f}%)")
+    print(f"Active frames (immediate delta >= threshold): {active_frames} ({active_frames / total_frames * 100:.1f}%)")
     print()
     print(f"Output saved to: {output_path}")
     print(f"  Episodes: {len(valid_timesteps)}")
