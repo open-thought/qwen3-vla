@@ -317,7 +317,6 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         bspline_bounds=config.bspline_bounds,
         bspline_token_order=config.bspline_token_order,
         state_history_len=state_history_len,
-        state_history_filter_valid_prob=config.state_history_filter_valid_prob,
     )
 
     # Split into train/val
@@ -362,7 +361,6 @@ def create_distributed_dataloaders(config: TrainingConfig, processor, rank: int,
         bspline_bounds=config.bspline_bounds,
         bspline_token_order=config.bspline_token_order,
         state_history_len=state_history_len,
-        state_history_filter_valid_prob=0.0,  # No filtering during validation
     )
 
     # Use same indices for validation

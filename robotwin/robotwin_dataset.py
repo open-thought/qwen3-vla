@@ -98,7 +98,6 @@ class RoboTwinVLADataset(Dataset):
         bspline_token_order: str = "basis_first",
         # State history parameters
         state_history_len: int = 0,  # 0 = disabled, >0 = number of past timesteps to include
-        state_history_filter_valid_prob: float = 0.0,  # Probability of filtering history to valid timesteps only
     ):
         """
         Args:
@@ -135,11 +134,6 @@ class RoboTwinVLADataset(Dataset):
                 encoding. If 0, state history is disabled. If > 0, extracts the last K states
                 (including current) and returns them normalized to [-1, 1]. At episode start,
                 missing timesteps are padded with zeros. Default 0 (disabled).
-            state_history_filter_valid_prob: Probability of filtering state history to only include
-                valid (non-idle) timesteps. When filtering is applied, only timesteps that are in
-                the valid_timesteps set are included, with zeros padding for missing entries.
-                This helps reduce distribution mismatch between training and inference where
-                there are fewer idle frames. Default 0.0 (disabled, all timesteps included).
         """
         self.dataset_root = Path(dataset_root)
         self.action_horizon = action_horizon
@@ -244,7 +238,6 @@ class RoboTwinVLADataset(Dataset):
 
         # State history settings (for neural state encoder)
         self.state_history_len = state_history_len
-        self.state_history_filter_valid_prob = state_history_filter_valid_prob
 
         # Zip file cache
         self.zip_cache = ZipFileCache(max_open=cache_size)
@@ -262,8 +255,6 @@ class RoboTwinVLADataset(Dataset):
         if state_history_len > 0:
             print(f"\nState history enabled:")
             print(f"  History length: {state_history_len} timesteps")
-            if state_history_filter_valid_prob > 0:
-                print(f"  Filter to valid timesteps prob: {state_history_filter_valid_prob}")
 
         print(f"\nDataset ready!")
         print(f"  Episodes: {len(self.index.episodes)}")
@@ -485,7 +476,7 @@ class RoboTwinVLADataset(Dataset):
         state_history = None
         if self.state_history_len > 0:
             state_history = self._extract_state_history(
-                full_joints, full_grippers_continuous, timestep, robot_type, ep_meta
+                full_joints, full_grippers_continuous, timestep, robot_type
             )
 
         # Tokenize delta actions
@@ -566,76 +557,51 @@ class RoboTwinVLADataset(Dataset):
         full_grippers: np.ndarray,
         timestep: int,
         robot_type: str,
-        ep_meta: EpisodeMetadata,
     ) -> np.ndarray:
         """
         Extract state history for neural encoder.
 
         Extracts the last K timesteps of state (including current), normalized to [-1, 1].
-        At the start of episodes where we don't have K timesteps, pads with zeros.
-
-        With state_history_filter_valid_prob > 0, there's a chance that only valid (non-idle)
-        timesteps are included in the history. When filtering, we walk backwards from the
-        current timestep to collect K valid timesteps (or as many as available).
+        At the start of episodes where we don't have K timesteps, pads by replicating
+        the oldest available state (matching eval behavior).
 
         Args:
             full_joints: (T, 2*dof) joint positions for entire episode
             full_grippers: (T, 2) gripper positions for entire episode
             timestep: Current timestep index
             robot_type: Robot type for normalization
-            ep_meta: Episode metadata for looking up valid timesteps
 
         Returns:
-            state_history: (K, 2*dof + 2) normalized state history, padded with zeros
-                          at the start if fewer than K timesteps are available
+            state_history: (K, 2*dof + 2) normalized state history, padded by replicating
+                          the oldest state if fewer than K timesteps are available
         """
         K = self.state_history_len
         state_dim = full_joints.shape[1] + full_grippers.shape[1]
 
-        # Initialize output with zeros (for padding)
-        state_history = np.zeros((K, state_dim), dtype=np.float32)
-
-        # Determine if we should filter to valid timesteps only
-        filter_to_valid = (
-            self.state_history_filter_valid_prob > 0 and
-            random.random() < self.state_history_filter_valid_prob
-        )
-
-        # Collect timesteps to include in history
-        if filter_to_valid:
-            # Walk backwards from current timestep, collecting K valid timesteps
-            episode_key = f"{ep_meta.task_name}/{ep_meta.robot_type}_{ep_meta.variant}/episode{ep_meta.episode_idx}"
-            valid_ts_set = self.valid_timesteps.get(episode_key, set())
-
-            # Collect valid timesteps by walking backwards
-            collected_timesteps = []
-            t = timestep
-            while len(collected_timesteps) < K and t >= 0:
-                if t in valid_ts_set:
-                    collected_timesteps.append(t)
-                t -= 1
-
-            # Reverse to get chronological order (oldest first)
-            collected_timesteps = collected_timesteps[::-1]
-        else:
-            # No filtering: use the last K timesteps (or fewer at episode start)
-            start_idx = max(0, timestep - K + 1)
-            collected_timesteps = list(range(start_idx, timestep + 1))
+        # Use the last K timesteps (or fewer at episode start)
+        start_idx = max(0, timestep - K + 1)
+        collected_timesteps = list(range(start_idx, timestep + 1))
 
         # Extract and normalize states for collected timesteps
-        # Place them right-aligned in the output (most recent at end)
-        num_collected = len(collected_timesteps)
-        for i, t in enumerate(collected_timesteps):
-            # Right-align: if we have fewer than K, they go at the end
-            output_idx = K - num_collected + i
-
+        collected_states = []
+        for t in collected_timesteps:
             joints = full_joints[t].astype(np.float32)
             grippers = full_grippers[t].astype(np.float32)
 
             normalized_joints = self.normalizer.normalize_state(joints, robot_type)
             normalized_grippers = self.normalizer.normalize_grippers(grippers, robot_type)
 
-            state_history[output_idx] = np.concatenate([normalized_joints, normalized_grippers])
+            collected_states.append(np.concatenate([normalized_joints, normalized_grippers]))
+
+        # Pad by replicating the oldest state if we have fewer than K states
+        # This matches eval behavior and represents "robot was stationary here"
+        if len(collected_states) < K:
+            oldest_state = collected_states[0] if collected_states else np.zeros(state_dim, dtype=np.float32)
+            padding_count = K - len(collected_states)
+            collected_states = [oldest_state.copy() for _ in range(padding_count)] + collected_states
+
+        # Stack into output array
+        state_history = np.stack(collected_states, axis=0).astype(np.float32)
 
         return state_history
 

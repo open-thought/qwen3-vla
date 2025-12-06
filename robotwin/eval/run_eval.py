@@ -56,7 +56,7 @@ from envs.utils.create_actor import UnStableError
 from generate_episode_instructions import generate_episode_descriptions
 
 # Local imports
-from eval.qwen3_vla_policy import Qwen3VLAPolicy, get_model, reset_model
+from eval.qwen3_vla_policy import Qwen3VLAPolicy, get_model
 from eval.video_recorder import MultiCameraRecorder, get_observer_rgb
 from train_config import TrainingConfig
 
@@ -314,17 +314,14 @@ def run_evaluation(
             )
             TASK_ENV._set_eval_video_ffmpeg(ffmpeg_process)
 
-        # Reset model state
-        reset_model(model)
-
         # Set step limit
         TASK_ENV.step_lim = step_limit
         TASK_ENV.take_action_cnt = 0
         TASK_ENV.eval_success = False
 
-        # Initial observation
+        # Get initial observation and reset model state
         observation = TASK_ENV.get_obs()
-        model.update_state_history(observation)  # Add initial state to history buffer
+        model.reset(observation)  # Reset and initialize state history with initial observation
         step = 0
 
         print(f"\n  Episode {episode_count + 1}/{num_episodes} (seed={now_seed})")

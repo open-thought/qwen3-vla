@@ -2,7 +2,7 @@
 Training configuration for Qwen3-VLA on RoboTwin dataset.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Optional
 import yaml
 from pathlib import Path
@@ -91,7 +91,6 @@ class TrainingConfig:
     use_state_encoder: bool = False  # Enable neural state history encoding
     state_encoder_type: str = "conv1d"  # "conv1d", "mlp", "transformer", "rnn"
     state_history_len: int = 10  # Number of past timesteps (K) to encode
-    state_history_filter_valid_prob: float = 0.0  # Prob to filter history to valid timesteps only
     state_encoder_hidden_dim: int = 256  # Hidden dimension for encoder
     state_encoder_n_output_tokens: int = 4  # Number of output embedding tokens
     state_encoder_dropout: float = 0.1  # Dropout for regularization
@@ -187,10 +186,24 @@ class TrainingConfig:
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file.
+
+        Unknown keys in the YAML are ignored for backwards compatibility
+        with older checkpoint configs.
+        """
         with open(yaml_path) as f:
             config_dict = yaml.safe_load(f)
-        return cls(**config_dict)
+
+        # Filter to only known fields (for backwards compatibility)
+        valid_fields = {f.name for f in fields(cls)}
+        filtered_dict = {k: v for k, v in config_dict.items() if k in valid_fields}
+
+        # Warn about ignored keys
+        ignored_keys = set(config_dict.keys()) - valid_fields
+        if ignored_keys:
+            print(f"  Warning: Ignoring unknown config keys: {ignored_keys}")
+
+        return cls(**filtered_dict)
 
     def to_yaml(self, yaml_path: str) -> None:
         """Save configuration to YAML file."""

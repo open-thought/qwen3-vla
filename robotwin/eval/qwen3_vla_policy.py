@@ -229,13 +229,34 @@ class Qwen3VLAPolicy:
         else:
             self.state_history_buffer = None
 
-    def reset(self):
-        """Reset policy state at the start of a new episode."""
+    def reset(self, initial_observation: dict):
+        """
+        Reset policy state at the start of a new episode.
+
+        Args:
+            initial_observation: Initial observation to fill state history buffer.
+                The entire buffer is filled with this initial state,
+                representing "robot has been stationary at this position".
+        """
         self.current_qpos = None
         self.step_count = 0
-        # Clear state history buffer
+
+        # Initialize state history buffer with initial state
         if self.state_history_buffer is not None:
             self.state_history_buffer.clear()
+
+            # Extract and normalize initial state
+            state = self._get_state_vector(initial_observation)
+            grippers = self._get_gripper_state(initial_observation)
+
+            normalized_state = self.normalizer.normalize_state(state, self.robot_type)
+            normalized_grippers = self.normalizer.normalize_grippers(grippers, self.robot_type)
+
+            initial_state = np.concatenate([normalized_state, normalized_grippers])
+
+            # Fill entire buffer with initial state
+            for _ in range(self.state_history_len):
+                self.state_history_buffer.append(initial_state.copy())
 
     def print_timing_stats(self):
         """Print timing statistics summary."""
@@ -848,11 +869,3 @@ def eval(TASK_ENV, model: Qwen3VLAPolicy, observation: dict, execute_steps: int 
     return observation
 
 
-def reset_model(model: Qwen3VLAPolicy):
-    """
-    Reset model state at the start of a new episode.
-
-    Args:
-        model: Qwen3VLAPolicy instance
-    """
-    model.reset()
