@@ -1,14 +1,19 @@
 """
 RoboTwin dataset loader extending BaseVLADataset.
 
-Handles the RoboTwin recovery data format with:
-- Direct HDF5 file access
-- Subtask annotations for boundary-aware sampling
+Supports two data formats:
+1. Uncompressed format: {root}/data/episode*.hdf5 + subtask_annotations/
+2. Zip-based format: {root}/{task}/*.zip containing HDF5 files
+
+Features:
+- Subtask annotations for boundary-aware sampling (uncompressed format)
+- Episode-level sampling for zip-based format
 - Support for both joint delta and EEF pose delta action types
 """
 
 import io
 import json
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any
@@ -28,6 +33,42 @@ from .unified_sample import (
     ActiveComponents,
     compute_progress,
 )
+
+
+class ZipFileCache:
+    """LRU cache for open zip file handles."""
+
+    def __init__(self, max_open: int = 10):
+        self.max_open = max_open
+        self.cache: dict[str, tuple[zipfile.ZipFile, int]] = {}
+        self.access_counter = 0
+
+    def get(self, zip_path: Path) -> zipfile.ZipFile:
+        """Get an open zip file, opening if needed."""
+        path_str = str(zip_path)
+        if path_str in self.cache:
+            zf, _ = self.cache[path_str]
+            self.access_counter += 1
+            self.cache[path_str] = (zf, self.access_counter)
+            return zf
+
+        # Evict least recently used if cache is full
+        if len(self.cache) >= self.max_open:
+            lru_path = min(self.cache.items(), key=lambda x: x[1][1])[0]
+            self.cache[lru_path][0].close()
+            del self.cache[lru_path]
+
+        # Open new zip file
+        zf = zipfile.ZipFile(zip_path, "r")
+        self.access_counter += 1
+        self.cache[path_str] = (zf, self.access_counter)
+        return zf
+
+    def close_all(self):
+        """Close all open zip files."""
+        for zf, _ in self.cache.values():
+            zf.close()
+        self.cache.clear()
 
 
 @dataclass
@@ -64,13 +105,13 @@ ROBOTWIN_EEF_ACTION_SPEC = RobotActionSpec(
 
 class RoboTwinDataset(BaseVLADataset):
     """
-    RoboTwin dataset loader for recovery data with subtask awareness.
+    RoboTwin dataset loader supporting both recovery and zip-based formats.
 
     Supports:
-    - Subtask-aware action chunk padding
-    - State history respecting subtask boundaries
+    - Recovery format: Direct HDF5 with subtask annotations
+    - Zip-based format: Original RoboTwin dataset in zip archives
     - Both joint delta and EEF pose delta action types
-    - Selective arm prediction using subtask annotations
+    - Multiple robot types with filtering
     """
 
     DATASET_NAME = "robotwin"
@@ -85,9 +126,12 @@ class RoboTwinDataset(BaseVLADataset):
         action_horizon: int = 8,
         image_size: tuple[int, int] = (320, 240),
         action_type: str = "joint_delta",
-        robot_type: str = "aloha-agilex",
+        robot_type: Optional[str] = None,  # None = auto-detect or use filter
+        robot_types: Optional[list[str]] = None,  # Filter for zip format
+        variants: Optional[list[str]] = None,  # Filter for zip format
         tasks: Optional[list[str]] = None,
         episode_filter: Optional[list[int]] = None,
+        max_episodes_per_zip: Optional[int] = None,  # Limit for testing
         binarize_grippers: bool = False,
         gripper_open_threshold: float = 0.95,
         gripper_closed_threshold: float = 0.05,
@@ -97,35 +141,46 @@ class RoboTwinDataset(BaseVLADataset):
     ):
         """
         Args:
-            dataset_root: Root directory containing demo_recovery data
+            dataset_root: Root directory (demo_recovery for recovery format,
+                         or dataset root for zip format)
             norm_stats_path: Path to normalization statistics JSON
             action_horizon: Number of future timesteps to predict
             image_size: Target image size (width, height)
             action_type: "joint_delta", "eef_pose_delta", or "mixed"
-            robot_type: Robot type identifier
+            robot_type: Robot type for recovery format (default: "aloha-agilex")
+            robot_types: Filter by robot types for zip format
+            variants: Filter by variants (e.g., ["clean_50", "randomized_500"])
             tasks: Optional list of task names to include
             episode_filter: Optional list of episode indices to include
+            max_episodes_per_zip: Max episodes per zip file (for testing)
             binarize_grippers: Whether to binarize gripper values
             gripper_open_threshold: Threshold for open gripper
             gripper_closed_threshold: Threshold for closed gripper
             eef_action_ratio: Ratio of EEF samples in mixed mode
-            cache_size: Number of HDF5 files to keep open
+            cache_size: Number of HDF5/zip files to keep open
         """
-        self.robot_type_name = robot_type
+        self.robot_type_name = robot_type or "aloha-agilex"
+        self.robot_types_filter = robot_types
+        self.variants_filter = variants
         self.tasks_filter = tasks
         self.episode_filter = episode_filter
+        self.max_episodes_per_zip = max_episodes_per_zip
         self.binarize_grippers = binarize_grippers
         self.gripper_open_threshold = gripper_open_threshold
         self.gripper_closed_threshold = gripper_closed_threshold
         self.eef_action_ratio = eef_action_ratio
         self.cache_size = cache_size
 
-        # HDF5 file cache
-        self._hdf5_cache = {}
+        # Caches
+        self._hdf5_cache: dict[str, h5py.File] = {}
+        self._zip_cache = ZipFileCache(max_open=cache_size)
 
         # Episode and subtask data (populated by _build_sample_index)
-        self.episodes = []
-        self.subtask_annotations = {}
+        self.episodes: list[dict] = []
+        self.subtask_annotations: dict[int, dict] = {}
+
+        # Format detection (set during _scan_episodes)
+        self._format: str = "unknown"  # "uncompressed" or "zip"
 
         # Call parent init (which calls _build_sample_index)
         super().__init__(
@@ -138,6 +193,7 @@ class RoboTwinDataset(BaseVLADataset):
         )
 
         print(f"RoboTwin dataset ready:")
+        print(f"  Format: {self._format}")
         print(f"  Episodes: {len(self.episodes)}")
         print(f"  Samples: {len(self.samples)}")
         print(f"  Action type: {action_type}")
@@ -151,10 +207,17 @@ class RoboTwinDataset(BaseVLADataset):
             print(f"Warning: No episodes found in {self.dataset_root}")
             return []
 
+        # Route to format-specific sample building
+        if self._format == "uncompressed":
+            return self._build_samples_uncompressed()
+        else:
+            return self._build_samples_zip()
+
+    def _build_samples_uncompressed(self) -> list[dict]:
+        """Build samples for uncompressed format with subtask annotations."""
         # Load subtask annotations
         self.subtask_annotations = self._load_subtask_annotations()
 
-        # Build samples with subtask info
         samples = []
         for ep in self.episodes:
             if ep["episode_idx"] not in self.subtask_annotations:
@@ -163,22 +226,26 @@ class RoboTwinDataset(BaseVLADataset):
             annotations = self.subtask_annotations[ep["episode_idx"]]
             subtasks = annotations.get("subtasks", [])
 
+            # Build episode key for valid timesteps lookup
+            episode_key = f"{ep['task_name']}/episode{ep['episode_idx']}"
+
             for subtask in subtasks:
                 start_frame = subtask["start_frame"]
                 end_frame = subtask["end_frame"]
-                subtask_len = end_frame - start_frame
 
                 # Create samples for each valid timestep
-                # Need at least 1 future action
                 for t in range(start_frame, end_frame - 1):
                     samples.append({
+                        "format": "uncompressed",
                         "episode_idx": ep["episode_idx"],
+                        "episode_key": episode_key,
+                        "task_name": ep["task_name"],
                         "hdf5_path": ep["hdf5_path"],
                         "timestep": t,
                         "subtask_start": start_frame,
                         "subtask_end": end_frame,
                         "episode_total_frames": ep["num_timesteps"],
-                        "robot_type": self.robot_type_name,
+                        "robot_type": ep["robot_type"],
                         "subtask_info": SubtaskInfo(
                             subtask_id=subtask["subtask_id"],
                             subtask_type=subtask["type"],
@@ -194,14 +261,66 @@ class RoboTwinDataset(BaseVLADataset):
 
         return samples
 
+    def _build_samples_zip(self) -> list[dict]:
+        """Build samples for zip format (no subtask annotations)."""
+        samples = []
+
+        for ep in self.episodes:
+            # Load episode to get timestep count
+            try:
+                hdf5_file = self._get_hdf5_file_zip(ep)
+                num_timesteps = len(hdf5_file["joint_action"]["vector"])
+                ep["num_timesteps"] = num_timesteps
+            except Exception as e:
+                print(f"  Warning: Could not load episode {ep['episode_idx']} from {ep['zip_path']}: {e}")
+                continue
+
+            # Build episode key for valid timesteps lookup
+            episode_key = f"{ep['task_name']}/{ep['robot_type']}_{ep['variant']}/episode{ep['episode_idx']}"
+
+            # Treat entire episode as one segment
+            for t in range(num_timesteps - 1):
+                samples.append({
+                    "format": "zip",
+                    "episode_idx": ep["episode_idx"],
+                    "episode_key": episode_key,
+                    "task_name": ep["task_name"],
+                    "zip_path": ep["zip_path"],
+                    "zip_stem": ep["zip_stem"],
+                    "hdf5_path_in_zip": ep["hdf5_path_in_zip"],
+                    "timestep": t,
+                    "subtask_start": 0,
+                    "subtask_end": num_timesteps,
+                    "episode_total_frames": num_timesteps,
+                    "robot_type": ep["robot_type"],
+                    "variant": ep["variant"],
+                    # No subtask info for zip format
+                    "subtask_info": None,
+                })
+
+        return samples
+
     def _scan_episodes(self) -> list[dict]:
-        """Scan dataset directory for episodes."""
+        """Scan dataset directory for episodes, auto-detecting format."""
+        # Check for uncompressed format (direct HDF5 files)
+        data_dir = self.dataset_root / "data"
+        if data_dir.exists() and any(data_dir.glob("episode*.hdf5")):
+            self._format = "uncompressed"
+            return self._scan_episodes_uncompressed()
+
+        # Check for zip-based format (task directories with zip files)
+        task_dirs = [d for d in self.dataset_root.iterdir() if d.is_dir()]
+        if task_dirs and any(any(d.glob("*.zip")) for d in task_dirs):
+            self._format = "zip"
+            return self._scan_episodes_zip()
+
+        return []
+
+    def _scan_episodes_uncompressed(self) -> list[dict]:
+        """Scan uncompressed format: direct HDF5 with subtask annotations."""
         episodes = []
         data_dir = self.dataset_root / "data"
         subtask_dir = self.dataset_root / "subtask_annotations"
-
-        if not data_dir.exists():
-            return episodes
 
         # Get task name from directory structure
         task_name = self.dataset_root.parent.name if self.dataset_root.name == "demo_recovery" else "unknown"
@@ -227,12 +346,86 @@ class RoboTwinDataset(BaseVLADataset):
                 num_timesteps = len(f["joint_action"]["vector"])
 
             episodes.append({
+                "format": "uncompressed",
                 "task_name": task_name,
                 "episode_idx": episode_idx,
                 "hdf5_path": hdf5_path,
                 "subtask_path": subtask_path,
                 "num_timesteps": num_timesteps,
+                "robot_type": self.robot_type_name,
             })
+
+        return episodes
+
+    def _scan_episodes_zip(self) -> list[dict]:
+        """Scan zip-based format: task directories with zip archives."""
+        episodes = []
+
+        # Get all task directories
+        task_dirs = [d for d in self.dataset_root.iterdir() if d.is_dir()]
+
+        if self.tasks_filter:
+            task_dirs = [d for d in task_dirs if d.name in self.tasks_filter]
+
+        for task_dir in sorted(task_dirs):
+            task_name = task_dir.name
+
+            # Find all zip files in this task directory
+            for zip_path in sorted(task_dir.glob("*.zip")):
+                # Parse zip filename: {robot_type}_{variant}.zip
+                # e.g., "aloha-agilex_clean_50.zip" -> robot="aloha-agilex", variant="clean_50"
+                stem = zip_path.stem
+                parts = stem.rsplit("_", 2)
+
+                if len(parts) >= 2:
+                    robot_type = "_".join(parts[:-2]) if len(parts) > 2 else parts[0]
+                    variant = f"{parts[-2]}_{parts[-1]}"
+                else:
+                    continue
+
+                # Apply filters
+                if self.robot_types_filter and robot_type not in self.robot_types_filter:
+                    continue
+                if self.variants_filter and variant not in self.variants_filter:
+                    continue
+
+                # Scan episodes in this zip
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        # Find episode HDF5 files
+                        data_files = [
+                            f for f in zf.namelist()
+                            if f.startswith(f"{stem}/data/episode") and f.endswith(".hdf5")
+                        ]
+
+                        episode_count = 0
+                        for data_file in sorted(data_files):
+                            basename = Path(data_file).stem  # "episode0"
+                            episode_idx = int(basename.replace("episode", ""))
+
+                            # Apply episode filter
+                            if self.episode_filter and episode_idx not in self.episode_filter:
+                                continue
+
+                            # Apply max episodes limit
+                            if self.max_episodes_per_zip and episode_count >= self.max_episodes_per_zip:
+                                break
+
+                            episodes.append({
+                                "format": "zip",
+                                "task_name": task_name,
+                                "episode_idx": episode_idx,
+                                "zip_path": zip_path,
+                                "zip_stem": stem,
+                                "hdf5_path_in_zip": data_file,
+                                "robot_type": robot_type,
+                                "variant": variant,
+                                # num_timesteps will be loaded lazily
+                            })
+                            episode_count += 1
+
+                except Exception as e:
+                    print(f"  Warning: Could not scan {zip_path}: {e}")
 
         return episodes
 
@@ -245,7 +438,7 @@ class RoboTwinDataset(BaseVLADataset):
         return annotations
 
     def _get_hdf5_file(self, hdf5_path: Path) -> h5py.File:
-        """Get HDF5 file from cache or open it."""
+        """Get HDF5 file from cache or open it (uncompressed format)."""
         path_str = str(hdf5_path)
         if path_str in self._hdf5_cache:
             return self._hdf5_cache[path_str]
@@ -260,9 +453,37 @@ class RoboTwinDataset(BaseVLADataset):
         self._hdf5_cache[path_str] = hdf5_file
         return hdf5_file
 
+    def _get_hdf5_file_zip(self, ep: dict) -> h5py.File:
+        """Get HDF5 file from zip archive, with caching."""
+        cache_key = f"{ep['zip_path']}::{ep['hdf5_path_in_zip']}"
+
+        if cache_key in self._hdf5_cache:
+            return self._hdf5_cache[cache_key]
+
+        # Evict oldest if cache is full
+        if len(self._hdf5_cache) >= self.cache_size:
+            oldest_key = next(iter(self._hdf5_cache))
+            self._hdf5_cache[oldest_key].close()
+            del self._hdf5_cache[oldest_key]
+
+        # Read HDF5 from zip
+        zf = self._zip_cache.get(ep["zip_path"])
+        hdf5_bytes = zf.read(ep["hdf5_path_in_zip"])
+        hdf5_file = h5py.File(io.BytesIO(hdf5_bytes), "r")
+
+        self._hdf5_cache[cache_key] = hdf5_file
+        return hdf5_file
+
+    def _get_hdf5_for_sample(self, sample_info: dict) -> h5py.File:
+        """Get HDF5 file for a sample, handling both formats."""
+        if sample_info.get("format") == "zip":
+            return self._get_hdf5_file_zip(sample_info)
+        else:
+            return self._get_hdf5_file(sample_info["hdf5_path"])
+
     def _load_raw_sample(self, sample_info: dict) -> dict[str, Any]:
         """Load raw data for a single sample."""
-        hdf5_file = self._get_hdf5_file(sample_info["hdf5_path"])
+        hdf5_file = self._get_hdf5_for_sample(sample_info)
         timestep = sample_info["timestep"]
         subtask_info = sample_info["subtask_info"]
         subtask_start = sample_info["subtask_start"]
@@ -306,8 +527,11 @@ class RoboTwinDataset(BaseVLADataset):
             "right_wrist": self._load_image(hdf5_file["observation"]["right_camera"]["rgb"][timestep]),
         }
 
-        # Determine active components from subtask arm annotation
-        active_components = self._arm_to_active_components(subtask_info.arm)
+        # Detect active components from action magnitudes
+        active_components = self.detect_active_components(
+            actions,
+            action_spec=ROBOTWIN_JOINT_ACTION_SPEC if actual_action_type == "joint_delta" else ROBOTWIN_EEF_ACTION_SPEC,
+        )
 
         # State history
         state_history = None
@@ -316,21 +540,23 @@ class RoboTwinDataset(BaseVLADataset):
                 full_joints, full_grippers, timestep, subtask_start
             )
 
-        # Task name from episode
-        ep = next(e for e in self.episodes if e["episode_idx"] == sample_info["episode_idx"])
-        task_name = ep["task_name"]
+        # Task name - use from sample_info directly (works for both formats)
+        task_name = sample_info["task_name"]
+
+        # Get subtask description if available
+        subtask_description = subtask_info.instruction if subtask_info is not None else None
 
         return {
             "images": images,
             "state": np.concatenate([current_joints, current_grippers]),
             "actions": actions,
             "task_description": f"Complete the {task_name.replace('_', ' ')} task",
-            "subtask_description": subtask_info.instruction,
+            "subtask_description": subtask_description,
             "robot_type": sample_info["robot_type"],
             "episode_frame_idx": timestep,
             "episode_total_frames": sample_info["episode_total_frames"],
-            "subtask_frame_idx": timestep - subtask_start,
-            "subtask_total_frames": subtask_end - subtask_start,
+            "subtask_frame_idx": timestep - subtask_start if subtask_info is not None else None,
+            "subtask_total_frames": subtask_end - subtask_start if subtask_info is not None else None,
             "state_history": state_history,
             "active_components": active_components,
             "action_type_override": actual_action_type,
@@ -482,15 +708,6 @@ class RoboTwinDataset(BaseVLADataset):
 
         return result
 
-    def _arm_to_active_components(self, arm: str) -> ActiveComponents:
-        """Convert arm annotation to ActiveComponents flags."""
-        if arm == "left":
-            return ActiveComponents.LEFT
-        elif arm == "right":
-            return ActiveComponents.RIGHT
-        else:
-            return ActiveComponents.ALL
-
     def _extract_state_history(
         self,
         full_joints: np.ndarray,
@@ -614,10 +831,15 @@ class RoboTwinDataset(BaseVLADataset):
         )
 
     def close(self):
-        """Close all open HDF5 files."""
+        """Close all open HDF5 files and zip handles."""
         for f in self._hdf5_cache.values():
-            f.close()
+            try:
+                f.close()
+            except (TypeError, ValueError):
+                # h5py files from BytesIO may not close cleanly
+                pass
         self._hdf5_cache.clear()
+        self._zip_cache.close_all()
 
     def __del__(self):
         self.close()

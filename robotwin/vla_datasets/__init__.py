@@ -12,7 +12,7 @@ from .unified_sample import (
     UnifiedSample,
     compute_progress,
 )
-from .base_dataset import BaseVLADataset
+from .base_dataset import BaseVLADataset, ValidTimestepsIndex
 from .robotwin_dataset import RoboTwinDataset
 from .robocoin_dataset import RoboCOINDataset
 from .lerobot_dataset import LeRobotVLADataset
@@ -31,6 +31,7 @@ __all__ = [
     "compute_progress",
     # Base class
     "BaseVLADataset",
+    "ValidTimestepsIndex",
     # Dataset loaders
     "RoboTwinDataset",
     "RoboCOINDataset",
